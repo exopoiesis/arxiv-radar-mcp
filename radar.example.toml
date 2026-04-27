@@ -1,0 +1,35 @@
+# Example arxiv-radar config. Copy to ~/.config/arxiv-radar/radar.toml (or wherever
+# platformdirs.user_config_dir resolves on your OS) and adjust.
+#
+# Override at runtime: ARXIV_RADAR_CONFIG=./radar.toml arxiv-radar-mcp
+#                  or  arxiv-radar-mcp --config ./radar.toml
+
+# --- sources -----------------------------------------------------------------
+# Each [sources.<name>] block is one domain feed. The `name` becomes the
+# `domain` filter on every search tool.
+
+[sources.ai4chem]
+# type = "github" → fetched from raw.githubusercontent.com on first build,
+# cached on disk under embeddings.cache_dir / shards / <name>/.
+type   = "github"
+repo   = "exopoiesis/daily-arxiv-ai4chem"
+branch = "main"
+
+# [sources.physics]
+# type = "github"
+# repo = "exopoiesis/daily-arxiv-physics"
+
+# [sources.local-dev]
+# type = "local"
+# path = "/home/me/projects/daily-arxiv-polymers"   # reads <path>/data/papers-*.json directly
+
+# --- embeddings --------------------------------------------------------------
+[embeddings]
+model      = "sentence-transformers/all-MiniLM-L6-v2"
+# cache_dir = "~/.cache/arxiv-radar/embeddings"   # platformdirs default if omitted
+batch_size = 64
+
+# --- server ------------------------------------------------------------------
+[server]
+default_k    = 10    # fallback k when a tool is invoked without one
+hybrid_rrf_k = 60    # RRF constant; 60 is the canonical default

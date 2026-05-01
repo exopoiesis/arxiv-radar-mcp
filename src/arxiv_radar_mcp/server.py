@@ -657,6 +657,24 @@ def _build_mcp_app(radar: RadarServer):
     return app
 
 
+async def _warmup_encoder(radar: RadarServer) -> None:
+    """Force a single dummy encode so the user's first real query doesn't
+    pay the lazy-load cost (~20 sec for Qwen3-4B on RTX 4070, much longer
+    if the model has to download weights from HF Hub first).
+
+    Runs on a worker thread so the event loop stays responsive — allows
+    the HTTP server to accept connections while warm-up is in progress.
+    Failures are logged but never propagate; cold-start search will just
+    be slow but functional.
+    """
+    LOG.info("encoder warm-up: starting (so first query doesn't cold-load)")
+    try:
+        await asyncio.to_thread(radar.encoder.encode_query, "warmup")
+        LOG.info("encoder warm-up: ready")
+    except Exception as e:  # noqa: BLE001
+        LOG.warning(f"encoder warm-up failed (will retry on first query): {e}")
+
+
 async def _refresh_loop(radar: RadarServer) -> None:
     """Background daily refresh of the abstract corpus.
 
@@ -727,12 +745,15 @@ async def _run_stdio(radar: RadarServer) -> None:
     if radar.config.refresh.enabled:
         refresh_task = asyncio.create_task(_refresh_loop(radar),
                                            name="abstract-refresh")
+    warmup_task = asyncio.create_task(_warmup_encoder(radar),
+                                       name="encoder-warmup")
     try:
         async with stdio_server() as (read, write):
             await app.run(read, write, app.create_initialization_options())
     finally:
         if refresh_task is not None:
             refresh_task.cancel()
+        warmup_task.cancel()
 
 
 async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None:
@@ -769,6 +790,8 @@ async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None
     if radar.config.refresh.enabled:
         refresh_task = asyncio.create_task(_refresh_loop(radar),
                                            name="abstract-refresh")
+    warmup_task = asyncio.create_task(_warmup_encoder(radar),
+                                       name="encoder-warmup")
 
     try:
         async with session_manager.run():
@@ -780,6 +803,7 @@ async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None
     finally:
         if refresh_task is not None:
             refresh_task.cancel()
+        warmup_task.cancel()
 
 
 def serve(config_path: Path | None = None) -> None:

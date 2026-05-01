@@ -165,18 +165,47 @@ class Encoder:
     """
 
     def __init__(self, config: Config) -> None:
+        import threading
         self.config = config
         self._model = None  # type: ignore[var-annotated]
+        # Guard concurrent _ensure_loaded calls — refresh loop, warmup task,
+        # and reindex jobs all live in different worker threads and can race
+        # to load the model twice. Two SentenceTransformer instances ≈ 2×
+        # GPU memory (16 GB for Qwen3-4B bf16 — exhausts a 12 GB card,
+        # forcing slow CPU/host-memory spillover that drops every encode
+        # speed by 3-50× depending on bucket).
+        self._model_lock = threading.Lock()
 
     @property
     def model_name(self) -> str:
         return self.config.embeddings.model
 
     def _ensure_loaded(self) -> None:
-        if self._model is None:
+        # Fast path — no lock when already loaded.
+        if self._model is not None:
+            return
+        with self._model_lock:
+            # Re-check after acquiring the lock: another thread may have
+            # finished loading while we were blocked.
+            if self._model is not None:
+                return
+            import torch
             from sentence_transformers import SentenceTransformer
             LOG.info(f"loading bi-encoder {self.model_name}...")
-            self._model = SentenceTransformer(self.model_name)
+            model = SentenceTransformer(self.model_name)
+            # Cast to bf16 on CUDA. Qwen3-Embedding ships with bf16 weights
+            # but sentence-transformers leaves activation dtype at fp32 by
+            # default — causing `RuntimeError: expected mat1 and mat2 to
+            # have the same dtype` inside Linear layers when the model
+            # actually runs. Explicit cast unifies weight and activation
+            # dtype so the matmul kernels match.
+            # CPU path stays fp32 — bf16 on CPU is much slower than fp32.
+            if torch.cuda.is_available():
+                model = model.to(dtype=torch.bfloat16)
+                LOG.info(f"  cast to bfloat16 on cuda")
+            # Publish only after fully initialized so other threads see a
+            # consistent state.
+            self._model = model
 
     def encode_query(self, text: str, max_seq_length: int = 512) -> np.ndarray:
         """Encode a single query. L2-normalized, with model-specific prefix.

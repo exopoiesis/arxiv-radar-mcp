@@ -161,8 +161,64 @@ def test_chunk_markdown_keeps_inline_latex():
     assert "\\alpha" in text
 
 
-def test_chunk_markdown_default_max_tokens_is_12000():
-    """[РЕШЕНИЕ-014]: chunker default == fulltext encoder seq window."""
+def test_chunk_markdown_default_max_tokens_is_4096():
+    """2026-05-02 perf rebalance: was 12_000, dropped to 4_096 so most
+    sections land in the medium encode bucket (~5-10× reindex speedup).
+    Encoder seq window in fulltext_index follows the same value."""
     import inspect
+    from arxiv_radar_mcp.fulltext_index import FULLTEXT_MAX_SEQ_LENGTH
     sig = inspect.signature(chunk_markdown)
-    assert sig.parameters["max_tokens"].default == 12_000
+    assert sig.parameters["max_tokens"].default == 4_096
+    assert FULLTEXT_MAX_SEQ_LENGTH == 4_096
+
+
+# ----- paragraph-aligned overlap --------------------------------------------
+
+
+def test_split_long_section_overlap_carries_tail():
+    """When a long section gets split, the trailing paragraphs of one
+    chunk re-appear at the start of the next."""
+    p1 = "Para A. " * 50    # ~50 tokens
+    p2 = "Para B. " * 50
+    p3 = "Para C. " * 50
+    p4 = "Para D. " * 50
+    p5 = "Para E. " * 50
+    text = "\n\n".join([p1, p2, p3, p4, p5])
+
+    # max_tokens=200 forces split after ~3 paragraphs;
+    # overlap_ratio=0.20 → carry ≈ 40 tokens (1 paragraph) into next chunk.
+    chunks = split_long_section(text, max_tokens=200, overlap_ratio=0.20)
+    assert len(chunks) >= 2
+
+    # Last paragraph of chunk 0 should appear at the start of chunk 1.
+    chunk0_last = chunks[0].rsplit("\n\n", 1)[-1].strip()
+    chunk1_first = chunks[1].split("\n\n", 1)[0].strip()
+    assert chunk0_last == chunk1_first, (
+        f"expected overlap, got chunk0 tail={chunk0_last[:30]!r} "
+        f"chunk1 head={chunk1_first[:30]!r}"
+    )
+
+
+def test_split_long_section_no_overlap_when_ratio_zero():
+    p1 = "X. " * 50
+    p2 = "Y. " * 50
+    p3 = "Z. " * 50
+    text = "\n\n".join([p1, p2, p3])
+    chunks = split_long_section(text, max_tokens=100, overlap_ratio=0.0)
+    if len(chunks) >= 2:
+        # No paragraph repetition between chunks.
+        chunk0_last = chunks[0].rsplit("\n\n", 1)[-1].strip()
+        chunk1_first = chunks[1].split("\n\n", 1)[0].strip()
+        assert chunk0_last != chunk1_first
+
+
+def test_split_long_section_overlap_does_not_create_infinite_chunks():
+    """Overlap must not cause runaway sub-splitting. The number of chunks
+    is bounded — at worst one chunk per paragraph (because carry never
+    feeds back into the loop)."""
+    n_paragraphs = 20
+    text = "\n\n".join(["short. " * 5 for _ in range(n_paragraphs)])
+    chunks = split_long_section(text, max_tokens=100, overlap_ratio=0.20)
+    # Sanity bounds: at least one chunk, at most n_paragraphs (the
+    # degenerate case where every paragraph alone fills max_tokens).
+    assert 1 <= len(chunks) <= n_paragraphs

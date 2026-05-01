@@ -339,7 +339,7 @@ def test_encode_bucketed_preserves_original_order(tmp_path: Path):
     counts = {label: n for label, n, _t in stats}
     assert counts.get("≤512t") == 2
     assert counts.get("≤2048t") == 1
-    assert counts.get("≤12288t") == 1
+    assert counts.get("≤4096t") == 1
 
 
 def test_encode_bucketed_empty_chunks():
@@ -348,3 +348,131 @@ def test_encode_bucketed_empty_chunks():
     matrix, stats = _encode_bucketed(enc, [])
     assert matrix.shape == (0, enc.dim) or matrix.shape[0] == 0
     assert stats == []
+
+
+# ----- junk section filter --------------------------------------------------
+
+
+@pytest.mark.parametrize("section,expected", [
+    # Junk
+    ("References", True),
+    ("REFERENCES", True),
+    ("Reference", True),
+    ("Acknowledgments", True),
+    ("Acknowledgements", True),
+    ("V Acknowledgements", True),
+    ("Bibliography", True),
+    ("Data Availability", True),
+    ("Data availability", True),
+    ("Author Contributions", True),
+    ("Funding", True),
+    ("Competing Interests", True),
+    ("Conflict of Interest", True),
+    ("Supplementary Material", True),
+    ("Supplementary Information", True),
+    ("Appendix A", True),
+    ("Appendix B", True),
+    ("S10 References", True),
+    # NOT junk
+    ("Header", False),
+    ("Abstract", False),
+    ("Introduction", False),
+    ("1 Introduction", False),
+    ("Methods", False),
+    ("Methodology", False),
+    ("Results", False),
+    ("Discussion", False),
+    ("Conclusions", False),
+    ("Body", False),
+    ("3 Dataset", False),
+    ("4.2 Force field dependency", False),
+    ("S10 Incorporating Non-Adiabatic Effects into the Photochemistry of Liquid Water", False),
+    ("", False),
+])
+def test_is_junk_section_classifies_correctly(section, expected):
+    from arxiv_radar_mcp.fulltext_index import is_junk_section
+    assert is_junk_section(section) == expected, f"{section!r} → expected {expected}"
+
+
+def test_search_paper_semantic_filters_junk():
+    """Junk sections should be skipped in favour of clean ones from the
+    oversample pool, even when junk has higher cosine score."""
+    from arxiv_radar_mcp.fulltext_index import search_paper_semantic
+
+    # 6 rows: row 0 (References, top-score), rows 1-5 (clean sections)
+    n = 6
+    matrix = np.zeros((n, 8), dtype=np.float32)
+    for i in range(n):
+        matrix[i, 0] = 1.0 - i * 0.01      # row 0 highest, then descending
+    chunks = [
+        {"arxiv_id": "p1", "section": "References", "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p2", "section": "Methods", "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p3", "section": "Results", "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p4", "section": "Introduction", "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p5", "section": "Discussion", "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p6", "section": "Header", "chunk_idx": 0, "n_chars": 100},
+    ]
+    index = EmbeddingIndex(
+        matrix=matrix,
+        row_for={c["arxiv_id"]: i for i, c in enumerate(chunks)},
+        model_name="fake/test",
+        dims=8,
+        metadata={"chunks": chunks, "max_seq_length": 12_000, "n_papers": n},
+    )
+
+    qvec = np.zeros(8, dtype=np.float32)
+    qvec[0] = 1.0
+
+    out = search_paper_semantic(index, None, qvec, k=3)
+    sections = [r["section"] for r in out]
+    # First three should NOT include References — it loses to the next 3.
+    assert "References" not in sections
+    assert sections == ["Methods", "Results", "Introduction"]
+
+
+def test_search_paper_semantic_falls_back_to_junk_when_short():
+    """If the corpus is mostly junk, we still return what we have rather
+    than an empty list."""
+    from arxiv_radar_mcp.fulltext_index import search_paper_semantic
+
+    chunks = [
+        {"arxiv_id": "p1", "section": "References", "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p2", "section": "Acknowledgments", "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p3", "section": "Methods", "chunk_idx": 0, "n_chars": 100},
+    ]
+    matrix = np.zeros((3, 4), dtype=np.float32)
+    matrix[0, 0] = 1.0; matrix[1, 0] = 0.99; matrix[2, 0] = 0.98
+    index = EmbeddingIndex(
+        matrix=matrix,
+        row_for={c["arxiv_id"]: i for i, c in enumerate(chunks)},
+        model_name="fake/test",
+        dims=4,
+        metadata={"chunks": chunks, "max_seq_length": 12_000, "n_papers": 3},
+    )
+    qvec = np.zeros(4, dtype=np.float32); qvec[0] = 1.0
+
+    out = search_paper_semantic(index, None, qvec, k=5)
+    # 3 results total: one clean (Methods) first, then junk.
+    assert len(out) == 3
+    assert out[0]["section"] == "Methods"
+    assert out[1]["section"] in ("References", "Acknowledgments")
+
+
+def test_search_paper_text_filters_junk():
+    """Same junk filter applied to text search."""
+    from arxiv_radar_mcp.fulltext_index import search_paper_text
+
+    chunk_texts = [
+        "alpha beta gamma — references list with alpha beta",     # References (high score)
+        "alpha beta — methods section using alpha beta",            # Methods
+        "alpha beta — results contain alpha beta findings",         # Results
+    ]
+    chunk_meta = [
+        {"arxiv_id": "p1", "section": "References", "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p2", "section": "Methods",    "chunk_idx": 0, "n_chars": 100},
+        {"arxiv_id": "p3", "section": "Results",    "chunk_idx": 0, "n_chars": 100},
+    ]
+    out = search_paper_text(chunk_texts, chunk_meta, "alpha beta", k=2)
+    sections = [r["section"] for r in out]
+    assert "References" not in sections
+    assert sections == ["Methods", "Results"]

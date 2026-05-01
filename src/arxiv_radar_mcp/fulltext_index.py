@@ -39,23 +39,29 @@ LOG = logging.getLogger(__name__)
 # Encoder seq window for fulltext chunks. Matches the chunker's default
 # `max_tokens` — the chunker won't emit anything bigger than this, so we
 # never need to encode at a longer window.
-FULLTEXT_MAX_SEQ_LENGTH = 12_288
+FULLTEXT_MAX_SEQ_LENGTH = 4_096
 
 # Adaptive bucketing for reindex performance. Without bucketing, a 500-token
-# References chunk would still pad to 12 288 (the encoder's max_seq_length),
-# wasting ~96% of compute per row. Buckets group chunks by estimated token
-# count so each pass uses a tighter seq window. The exact thresholds are
-# heuristic — chosen so most "small" arxiv chunks (headings, captions,
-# References, short paragraphs) land in the smallest bucket.
+# References chunk would still pad to FULLTEXT_MAX_SEQ_LENGTH (encoder's
+# seq window), wasting compute per row. Buckets group chunks by estimated
+# token count so each pass uses a tighter seq window.
+#
+# Token thresholds reflect the 2026-05-02 chunker max=4096 default — the
+# previous "long" 12288 bucket disappeared once chunker started splitting
+# big sections into sub-chunks of ≤4096 tokens with overlap. On RTX 4070
+# with bf16 Qwen3-4B:
+#   short  (≤512)  : ~0.26 s/chunk @ batch=64
+#   medium (≤2048) : ~0.17 s/chunk @ batch=16
+#   long   (≤4096) : ~1-2 s/chunk @ batch=8
 #
 # Each entry: (max_tokens_inclusive, encode_seq_length, batch_size_on_12gb).
-# Buckets are tried in order; chunks fall into the first whose threshold
-# they fit within. Anything over the largest threshold uses the long bucket.
+# Anything over the largest threshold reuses the long bucket (truncated
+# to encode_seq_length by the encoder).
 _REINDEX_BUCKETS = [
     # (token_threshold, encode_seq_length, batch_size)
-    (   512,    512,  64),   # short: Headers, References, captions
-    ( 2_048,  2_048,  16),   # medium: typical paragraphs
-    (12_288, 12_288,   4),   # long: full sections
+    (   512,    512, 64),   # short: Headers, References, captions
+    ( 2_048,  2_048, 16),   # medium: typical paragraphs
+    ( 4_096,  4_096,  8),   # long: full sub-chunks of a methods/results section
 ]
 
 
@@ -295,6 +301,48 @@ def _snippet(text: str, query: str | None = None, length: int = 240) -> str:
     return head + ("…" if len(text) > length else "")
 
 
+# Section-name patterns we treat as "junk" — they're high-recall for any
+# query (lots of keywords from cited papers, author affiliations) but
+# they're rarely what a researcher actually wants to read. Header is
+# explicitly NOT in this list — it carries title+abstract and is often
+# the right hit.
+_JUNK_SECTION_RE = re.compile(
+    r"^(references?|"
+    r"acknowledge?ments?|"
+    r"bibliograph(y|ic)|"
+    r"data\s+availab(ility|le)|"
+    r"author\s+(contributions|information)|"
+    r"funding|"
+    r"competing\s+interests|"
+    r"declarations?|"
+    r"conflict\s+of\s+interest|"
+    r"supplementary\s+(material|information)|"
+    r"appendix\s+[a-z]\b)",   # "Appendix A", "Appendix B" etc — usually proofs/extras
+    re.IGNORECASE,
+)
+
+
+def is_junk_section(section_name: str) -> bool:
+    """True if section_name looks like a citations/admin section that
+    we want to demote in search results."""
+    if not section_name:
+        return False
+    name = section_name.strip()
+    # Strip leading section numbers / labels — many shapes in the wild:
+    #   "1 Introduction", "1.2.3 Foo", "S10 Methods", "A.1 Bar",
+    #   "V Acknowledgements" (Roman numeral), "Section 4. Results",
+    #   "Appendix A. References", "Chapter 3. Methods"
+    prefix_pattern = (
+        r"^("
+        r"(?:Section|Chapter|Part|Appendix)\s+[A-Z0-9]+\.?\s+"   # "Section 4. ", "Appendix A. "
+        r"|[IVXLCDM]+\b\.?\s+"                                    # Roman numerals: V, IV, III, …
+        r"|[A-Z]?\d+(?:\.\d+)*\.?\s+"                             # 1, 1.2, S10, A1
+        r")"
+    )
+    stripped = re.sub(prefix_pattern, "", name, count=1, flags=re.IGNORECASE)
+    return bool(_JUNK_SECTION_RE.match(stripped))
+
+
 def search_paper_text(
     chunk_texts: list[str],
     chunk_meta: list[dict],
@@ -302,7 +350,9 @@ def search_paper_text(
     k: int = 10,
 ) -> list[dict]:
     """Substring AND-scan over chunk texts. Title-boost not applicable here —
-    chunks already carry their section as a separate field."""
+    chunks already carry their section as a separate field. Junk sections
+    (References, Acknowledgments, etc.) are filtered after ranking — see
+    is_junk_section."""
     tokens = [t for t in re.split(r"\s+", query.lower().strip()) if t]
     if not tokens or not chunk_texts:
         return []
@@ -317,16 +367,28 @@ def search_paper_text(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     out: list[dict] = []
-    for score, idx in scored[:k]:
+    junk_fallback: list[dict] = []
+    for score, idx in scored:
         meta = chunk_meta[idx]
-        out.append({
+        item = {
             "arxiv_id": meta["arxiv_id"],
             "section": meta["section"],
             "chunk_idx": meta.get("chunk_idx", 0),
             "snippet": _snippet(chunk_texts[idx], query=query),
             "score": round(score, 4),
-        })
-    return out
+        }
+        if is_junk_section(meta["section"]):
+            junk_fallback.append(item)
+        else:
+            out.append(item)
+        if len(out) >= k:
+            break
+
+    # If filtering left us short, top up from junk so the response is
+    # never silently empty.
+    if len(out) < k:
+        out.extend(junk_fallback[: k - len(out)])
+    return out[:k]
 
 
 def search_paper_semantic(
@@ -337,8 +399,15 @@ def search_paper_semantic(
 ) -> list[dict]:
     """Cosine over chunk embeddings; return per-chunk payloads.
 
+    Junk sections (References / Acknowledgments / Data availability /
+    Appendix [A-Z] etc.) are filtered after ranking — they have high
+    keyword density but rarely match user intent. Filter is applied by
+    oversampling top-k×4 candidates and skipping junk; if filtering
+    leaves <k results, junk is appended at the tail so the response is
+    never silently empty.
+
     `chunk_texts` is optional — if provided we include a snippet, else
-    only the meta fields. The MCP tool wires it from cached source files.
+    only the meta fields.
     """
     if index.metadata is None or "chunks" not in index.metadata:
         return []
@@ -347,24 +416,36 @@ def search_paper_semantic(
         return []
 
     sims = index.matrix @ query_vec
-    top_n = min(k, len(sims))
-    top = np.argpartition(-sims, top_n - 1)[:top_n]
+    # Oversample so that after junk-filter we still have k clean hits in
+    # most realistic cases.
+    oversample = min(max(k * 4, 20), len(sims))
+    top = np.argpartition(-sims, oversample - 1)[:oversample]
     top_sorted = top[np.argsort(-sims[top])]
 
-    out: list[dict] = []
+    clean: list[dict] = []
+    junk: list[dict] = []
     for idx in top_sorted:
         meta = chunk_meta[int(idx)]
         snippet = ""
         if chunk_texts is not None and int(idx) < len(chunk_texts):
             snippet = _snippet(chunk_texts[int(idx)])
-        out.append({
+        item = {
             "arxiv_id": meta["arxiv_id"],
             "section": meta["section"],
             "chunk_idx": meta.get("chunk_idx", 0),
             "snippet": snippet,
             "score": round(float(sims[int(idx)]), 4),
-        })
-    return out
+        }
+        if is_junk_section(meta["section"]):
+            junk.append(item)
+        else:
+            clean.append(item)
+        if len(clean) >= k:
+            break
+
+    if len(clean) < k:
+        clean.extend(junk[: k - len(clean)])
+    return clean[:k]
 
 
 def similar_to_paper(

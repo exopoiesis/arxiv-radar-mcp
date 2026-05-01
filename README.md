@@ -165,17 +165,23 @@ as raw cosine — at the cost of 1.5s per query. The Reranker class
 stays in code as a utility but isn't wired to any tool. See
 `[РЕШЕНИЕ-010]` in PLAN.
 
-## Install
+## Deployment
 
-### Local (CPU, abstracts-only path)
+Two supported topologies:
+
+### A. Local (CPU, no GPU required)
+
+The whole server runs on the user's machine. Easiest setup, suitable
+for casual use and CPU-friendly models (mxbai-embed-large-v1,
+bge-large-en-v1.5). Full-text fetch + chunk + encode all stay local.
 
 ```bash
-pip install -e ".[dev]"
-arxiv-radar-mcp --build-cache       # ~7 min on GPU, infeasible on CPU for Qwen3-4B
-arxiv-radar-mcp                     # starts MCP server on stdio
+pip install arxiv-radar-mcp                  # not yet on PyPI; pip install -e . for source
+arxiv-radar-mcp --build-cache                # build abstract index once
+arxiv-radar-mcp                              # stdio MCP server
 ```
 
-For Claude Desktop, add to `claude_desktop_config.json`:
+`claude_desktop_config.json`:
 
 ```json
 {
@@ -187,31 +193,90 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 }
 ```
 
-### GPU (gomer Docker image, fulltext indexing)
+What runs on CPU comfortably:
+- abstract `search_abstract_*` over 14k papers — sub-second
+- `fetch_papers` (HTTP/LaTeX, no model) — seconds per paper
+- `reindex` over a few enriched papers with mxbai — minutes
+- Heavy Qwen3-4B reindex on CPU — **infeasible** (~100 hours / 100 papers).
+  Use mxbai or bge for CPU-only.
 
-Image: `exopoiesis/arxiv-radar-gpu:latest` (~10 GB pytorch + cuda12.4
-+ this code). Build context = this repo only.
+### B. Remote backend over SSH (GPU host)
 
-```bash
-# one-time build on gomer
-bash scripts/docker_build.sh
+Heavy work runs in a long-running container on a GPU host (gomer, Vast,
+any sshd-reachable Linux box with `--gpus all`). The user's laptop runs
+a thin stdio→HTTP proxy. SSH provides perimeter auth — no Bearer tokens,
+no TLS certs to manage. The backend binds loopback only inside the
+container; the only way in is your existing SSH key.
 
-# one-time: write radar.toml into the named volume
-bash tmp/gomer_init_volume.sh
-
-# fetch full text for a few papers
-bash scripts/docker_fetch.sh /cache/radar.toml /cache 2503.11576 2410.07073
-
-# rebuild fulltext index on GPU
-bash scripts/docker_reindex.sh /cache/radar.toml /cache
-
-# stdio MCP server bridged to local
-bash scripts/docker_serve_mcp.sh /cache/radar.toml /cache
+```
+Claude Desktop ── stdio ──▶ arxiv-radar-mcp --remote user@gomer
+                                │
+                                │ subprocess: ssh -L LOCAL:127.0.0.1:8765 user@gomer
+                                ▼
+                          [SSH tunnel]
+                                │
+                                ▼
+                  arxiv-radar-mcp container (long-running)
+                  Qwen3-4B in memory, jobs persist across requests
 ```
 
-The container has named volumes:
-- `arxiv-radar-cache` — `/cache` (radar.toml + abstracts/ + fulltext/ + jobs/)
-- `arxiv-radar-hf` — `/root/.cache/huggingface` (model weights)
+**One-time backend setup on the GPU host:**
+
+```bash
+# build (or pull) the GPU image
+bash scripts/docker_build.sh
+
+# write radar.toml into the named volume
+bash tmp/gomer_init_volume.sh
+
+# start the long-running backend (--restart unless-stopped)
+bash scripts/docker_serve_backend.sh
+```
+
+The backend container exposes 8765 on host loopback only
+(`-p 127.0.0.1:8765:8765`). It survives reboots; jobs persist in the
+named volume.
+
+**Local proxy on your laptop** — ensure `ssh` is on PATH (built into
+Windows 10+ / macOS / Linux), then:
+
+```json
+{
+  "mcpServers": {
+    "arxiv-radar": {
+      "command": "arxiv-radar-mcp",
+      "args": ["--remote", "user@gomer.lan"]
+    }
+  }
+}
+```
+
+The proxy opens an SSH tunnel each time Claude Desktop launches it,
+forwards MCP traffic to the remote backend, and tears the tunnel down
+on exit. Subsequent MCP calls have no cold-start cost — Qwen3-4B is
+already loaded on the GPU.
+
+**Backend management:**
+
+```bash
+bash scripts/docker_logs_backend.sh   # tail -f the container
+bash scripts/docker_stop_backend.sh   # remove it
+```
+
+Named volumes used by the backend:
+- `arxiv-radar-cache` → `/cache` (radar.toml + abstracts/ + fulltext/ + jobs/)
+- `arxiv-radar-hf` → `/root/.cache/huggingface` (Qwen3-4B weights)
+
+### Choice between A and B
+
+| | Local (A) | Remote SSH (B) |
+|---|---|---|
+| Hardware | any laptop | sshd-reachable host with NVIDIA GPU |
+| Embedding model | mxbai / bge (CPU-friendly) | Qwen3-4B native (production winner) |
+| Reindex 50 papers | ~30 min on a recent CPU | ~5 min on RTX 4070 |
+| Cold start per Claude session | ~5 sec | <100 ms (backend stays loaded) |
+| Setup steps | `pip install` + 1 line config | container + ssh keys + 1 line config |
+| Auth | n/a | SSH keys you already have |
 
 ## Config
 

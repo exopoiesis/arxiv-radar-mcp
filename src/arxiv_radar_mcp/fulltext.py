@@ -223,12 +223,25 @@ def _html_to_markdown(html: str, *, parser_cls) -> str:
 def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
     """Recursively render a node subtree to text/markdown.
 
-    - <math> nodes become inline `$...$` (or `$$...$$` for display) using
-      the LaTeX from <annotation encoding="application/x-tex">.
-    - <h2>/<h3>/<h4> become markdown headings (## / ### / ####), useful
-      for subsections inside a top-level section.
-    - The first <h1>/<h2> child can be skipped (we emitted it separately).
-    - <script>/<style>/<nav>/<figure caption> are dropped to reduce noise.
+    Heading promotion in arxiv (LaTeXML-rendered) HTML is **driven by CSS
+    class, not by tag name**. Different paper templates use different h
+    levels for the same logical level:
+
+      `\\section{}`     → h2.ltx_title_section  (most common)
+                       OR h3.ltx_title_section  (when paper has \\part{})
+      `\\subsection{}`  → h3.ltx_title_subsection or h4.ltx_title_subsection
+      `\\part{}`        → h2.ltx_title_part     (rare; we skip it — usually
+                                                 just labels "Main" vs "Appendix")
+      `\\chapter{}`     → h2.ltx_title_chapter  (very rare in arxiv papers)
+
+    So we look at the title class, not the tag, to decide markdown level.
+
+    Other behaviours:
+      - <math> nodes become inline `$...$` (or `$$...$$` for display) using
+        the LaTeX from <annotation encoding="application/x-tex">.
+      - The first <h*> child can be skipped if `skip_first_heading=True`
+        (we emitted that one separately as title or abstract heading).
+      - <script>/<style>/<nav>/pagination divs are dropped.
 
     Walks all descendants in document order via selectolax's traverse().
     """
@@ -249,7 +262,7 @@ def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
             continue
 
         if n.tag in skip_tags:
-            n.decompose()  # drop subtree
+            n.decompose()
             continue
 
         cls = n.attributes.get("class") or ""
@@ -257,18 +270,8 @@ def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
             n.decompose()
             continue
 
-        if not skipped and n.tag in ("h1", "h2"):
+        if not skipped and n.tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             skipped = True
-            n.decompose()
-            continue
-
-        # Promote remaining h2/h3/h4 inside the body to markdown headings.
-        if n.tag == "h2":
-            heading_text = _clean_text(n)
-            if heading_text:
-                if pieces and not pieces[-1].endswith("\n"):
-                    pieces.append("\n\n")
-                pieces.append(f"## {heading_text}\n\n")
             n.decompose()
             continue
 
@@ -278,7 +281,24 @@ def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
                 is_display = (n.attributes.get("display") == "block"
                               or "ltx_displaymath" in cls)
                 pieces.append(f"\n$$\n{tex}\n$$\n" if is_display else f"${tex}$")
-            n.decompose()  # don't re-emit MathML's text content
+            n.decompose()
+            continue
+
+        # Heading promotion by CSS class — robust across LaTeXML's level
+        # variations (different papers use h2/h3/h4 for the same logical role).
+        if n.tag in ("h1", "h2", "h3", "h4", "h5", "h6") and "ltx_title" in cls:
+            md_level = _heading_md_level(cls)
+            if md_level is None:
+                # Unrecognized title class — drop to avoid duplicating text
+                # which would otherwise be emitted by the descendant walker.
+                n.decompose()
+                continue
+            heading_text = _clean_text(n)
+            if heading_text:
+                if pieces and not pieces[-1].endswith("\n"):
+                    pieces.append("\n\n")
+                pieces.append(f"{'#' * md_level} {heading_text}\n\n")
+            n.decompose()
             continue
 
         # Block elements — insert paragraph break.
@@ -287,27 +307,38 @@ def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
                 pieces.append("\n\n")
             continue
 
-        # Subsection markers — promote h3/h4 to markdown headings,
-        # then decompose so the descendant text isn't re-emitted.
-        if n.tag == "h3":
-            heading_text = _clean_text(n)
-            if heading_text:
-                if pieces and not pieces[-1].endswith("\n"):
-                    pieces.append("\n\n")
-                pieces.append(f"### {heading_text}\n\n")
-            n.decompose()
-            continue
-        if n.tag == "h4":
-            heading_text = _clean_text(n)
-            if heading_text:
-                if pieces and not pieces[-1].endswith("\n"):
-                    pieces.append("\n\n")
-                pieces.append(f"#### {heading_text}\n\n")
-            n.decompose()
-            continue
-
     out = "".join(pieces)
     return _normalize_whitespace(out)
+
+
+def _heading_md_level(cls: str) -> int | None:
+    """Map LaTeXML `ltx_title_*` class → markdown heading level (#-count).
+
+    Returns None for class flavours we want to suppress (e.g. ltx_title_part
+    in dual-part papers like Pixtral, where the only `ltx_title_part`
+    headings are "Main" / "Appendix" wrappers that don't add real content).
+    """
+    if "ltx_title_document" in cls:
+        return 1
+    if "ltx_title_chapter" in cls:
+        return 2
+    if "ltx_title_part" in cls:
+        # Skip: usually a meta-grouping label ("Main", "Appendix"), not a
+        # real section. Real sections inside have their own ltx_title_section.
+        return None
+    if "ltx_title_section" in cls:
+        return 2
+    if "ltx_title_subsection" in cls:
+        return 3
+    if "ltx_title_subsubsection" in cls:
+        return 4
+    if "ltx_title_paragraph" in cls:
+        return 5
+    # Generic ltx_title without a level qualifier — treat as h3 (typical for
+    # abstract heading, figure captions promoted to titles, etc.).
+    if "ltx_title" in cls:
+        return 3
+    return None
 
 
 def _clean_text(node) -> str:

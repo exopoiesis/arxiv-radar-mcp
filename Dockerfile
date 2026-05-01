@@ -41,5 +41,7 @@ WORKDIR /workspace
 #   /data                    — corpus shards, radar.toml
 VOLUME ["/root/.cache/huggingface", "/cache", "/data"]
 
+EXPOSE 8765
+
 ENTRYPOINT ["arxiv-radar-entrypoint"]
-CMD ["mcp"]
+CMD ["mcp-http"]

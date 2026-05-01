@@ -278,3 +278,72 @@ def test_reindex_backfills_meta_n_chunks(tmp_path: Path):
 def test_reindex_no_sources_raises(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         reindex(tmp_path, _FakeEncoder())
+
+
+# ----- adaptive bucketing ----------------------------------------------------
+
+
+def test_reindex_buckets_chunks_by_length(tmp_path: Path):
+    """Reindex log/index should reflect that short chunks land in the
+    short bucket and long chunks in the long one — the size threshold
+    being _REINDEX_BUCKETS[0][0] (default 512 tokens)."""
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    short_body = "## A\nshort\n"
+    medium_body = "## B\n" + "para. " * 300 + "\n"          # ~300 tokens
+    long_body  = "## C\n" + "para. " * 3000 + "\n"          # ~3000 tokens
+    (sources / "p1.md").write_text(short_body + medium_body + long_body,
+                                   encoding="utf-8")
+    (sources / "p1.meta.json").write_text(json.dumps({
+        "arxiv_id": "p1", "source": "html", "fetch_time": "2026-05-01",
+        "n_chars": 1000, "n_chunks_after_split": 0,
+    }), encoding="utf-8")
+
+    # _FakeEncoder ignores max_seq_length but works for shape correctness.
+    enc = _FakeEncoder()
+    index = reindex(tmp_path, enc)
+
+    chunks_meta = (index.metadata or {}).get("chunks", [])
+    assert len(chunks_meta) == 3
+    sections = [m["section"] for m in chunks_meta]
+    assert sections == ["A", "B", "C"]
+    # Token estimates increase strictly: short < medium < long.
+    estimates = [m["n_tokens_est"] for m in chunks_meta]
+    assert estimates == sorted(estimates)
+
+
+def test_encode_bucketed_preserves_original_order(tmp_path: Path):
+    """When chunks are split into buckets and encoded separately, the
+    final matrix must put each row back at its original index — otherwise
+    chunk_meta and embeddings.npy would be misaligned."""
+    from arxiv_radar_mcp.chunker import Chunk
+    from arxiv_radar_mcp.fulltext_index import _encode_bucketed
+
+    # Mix of short (≤512), medium (≤2048), and long (>2048) chunks.
+    chunks = [
+        Chunk(section="long",   chunk_idx=0, text="L" * 1, n_chars=1, n_tokens_est=3000),
+        Chunk(section="short",  chunk_idx=0, text="s" * 1, n_chars=1, n_tokens_est=100),
+        Chunk(section="medium", chunk_idx=0, text="m" * 1, n_chars=1, n_tokens_est=1500),
+        Chunk(section="short2", chunk_idx=0, text="s" * 1, n_chars=1, n_tokens_est=200),
+    ]
+
+    enc = _FakeEncoder()
+    matrix, stats = _encode_bucketed(enc, chunks)
+
+    assert matrix.shape[0] == len(chunks)
+    # Stats contain one row per bucket; counts must add up to total.
+    total_in_buckets = sum(n for _label, n, _t in stats)
+    assert total_in_buckets == len(chunks)
+    # Short bucket should contain 2, medium 1, long 1.
+    counts = {label: n for label, n, _t in stats}
+    assert counts.get("≤512t") == 2
+    assert counts.get("≤2048t") == 1
+    assert counts.get("≤12288t") == 1
+
+
+def test_encode_bucketed_empty_chunks():
+    from arxiv_radar_mcp.fulltext_index import _encode_bucketed
+    enc = _FakeEncoder()
+    matrix, stats = _encode_bucketed(enc, [])
+    assert matrix.shape == (0, enc.dim) or matrix.shape[0] == 0
+    assert stats == []

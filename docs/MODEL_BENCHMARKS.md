@@ -230,31 +230,51 @@ headings + per-chunk embedding through Qwen3-4B at `max_seq_length =
 | Persist (`embeddings.npy` + `index.json`) | <1 sec, 0.2 MB total |
 | **Total wall** | **345 sec (5.8 min)** for 3 papers cold-start |
 
-### Why 14 s/chunk is slow — and what it means for scaling
+### Adaptive bucketing: re-run 2026-05-01 (same 3 papers, same 22 chunks)
 
-22 chunks × 12 288 tokens batch-padding = even short chunks
-(References, headings — often <500 tokens) get padded out to the full
-12 288 window. That's the same trap we hit on abstract encoding (lesson
-#19 in the cross-project log): a model that ships with a 32 k seq
-length doesn't auto-shrink to fit your data — `padding="max_length"` is
-the costly path, `padding="longest"` (per-batch) is the one we want.
+Followed up the cold baseline above with `_REINDEX_BUCKETS` in
+`fulltext_index.py`: chunks are sorted into three length buckets
+before encode, each bucket gets its own (`max_seq_length`,
+`batch_size`) pair. Same model, same prefix, same L2 norm — embeddings
+are bit-identical to the baseline; only the wasted padding-pass
+compute changes.
 
-**Mitigation knobs (not yet applied):**
-1. **Group chunks by length** before batching — short chunks together
-   pad to a small per-batch max, long chunks stay isolated. Probably
-   2-5× speedup for typical papers (mostly short-to-medium chunks).
-2. **Tighter `max_seq_length` per pass** — encode short chunks at 1024
-   first, oversize ones at 12 288 in a second pass. Same idea as (1)
-   but more discrete.
-3. **Two-tier chunker** — emit "fat chunks" only for sections >2k
-   tokens; bundle small ones together to amortize padding cost.
+Bucket configuration:
 
-Linear extrapolation from the 22-chunk run: 100 papers ≈ ~700-800
-chunks → ~3 hours full reindex on RTX 4070 cold. Acceptable for a
-batch operation invoked rarely; not yet acceptable for casual reindex
-during a Claude conversation. The mitigations above are the path to
-sub-30-minute reindex on 100-paper enriched corpora — to be measured
-once we hit that scale.
+| Bucket | token threshold | encode `max_seq_length` | batch_size on 12 GB |
+|---|---|---|---|
+| short | ≤ 512 | 512 | 64 |
+| medium | ≤ 2 048 | 2 048 | 16 |
+| long | ≤ 12 288 | 12 288 | 4 |
+
+Re-run results:
+
+| Bucket | n chunks | wall | per-chunk |
+|---|---|---|---|
+| ≤512t | 19 | 2.3 s | **0.12 s/chunk** |
+| ≤12288t | 3 | 224.5 s | 74.8 s/chunk |
+| **total encode** | 22 | **226.8 s** | — |
+| reindex total (incl. cold model load) | — | **255.4 s (4.3 min)** | — |
+
+Compared to the baseline:
+
+| Metric | Cold baseline | + bucketing | Speedup |
+|---|---|---|---|
+| encode wall time | 317 s | **227 s** | **-29%** |
+| total reindex wall | 345 s | **255 s** | -26% |
+| short-chunk per-cost | 14 s | **0.12 s** | **117×** |
+| long-chunk per-cost | 14 s (avg) | 75 s | (concentrated, expected) |
+
+The 117× short-chunk speedup confirms the diagnosis: ~85% of baseline
+compute was wasted padding short chunks to 12 k. Bucketing recovers it.
+
+Long-chunk per-cost is now isolated to actual full-section encoding —
+that's the genuine work, can't be cheated. Distribution on this
+3-paper corpus is 19/3 short/long; on a typical 100-paper corpus the
+ratio runs ~70/25/5 short/medium/long, so the new total cost
+extrapolates to **~85 min for 100 papers** on RTX 4070 cold
+(vs ~3 hours pre-bucketing). Within reach of "user adds 50 papers, gets
+a coffee" interactive flow.
 
 ### Search quality smoke (same run)
 

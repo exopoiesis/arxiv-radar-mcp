@@ -580,10 +580,13 @@ def _dispatch(server: RadarServer, name: str, arguments: dict[str, Any] | None) 
         return {"error": f"bad arguments for {name}: {e}"}
 
 
-async def _run_stdio(radar: RadarServer) -> None:
-    """Async stdio loop. Imported lazily so unit-tests don't need the SDK."""
+def _build_mcp_app(radar: RadarServer):
+    """Construct an mcp.server.Server with our tool catalogue wired in.
+
+    Shared between stdio and HTTP transports — same dispatcher, same
+    TOOL_SPECS. Imported lazily so unit-tests don't need the MCP SDK.
+    """
     from mcp.server import Server
-    from mcp.server.stdio import stdio_server
     from mcp.types import TextContent, Tool
 
     app: Server = Server("arxiv-radar")
@@ -598,12 +601,70 @@ async def _run_stdio(radar: RadarServer) -> None:
         text = json.dumps(result, indent=1, ensure_ascii=False, default=str)
         return [TextContent(type="text", text=text)]
 
+    return app
+
+
+async def _run_stdio(radar: RadarServer) -> None:
+    """Async stdio loop. Imported lazily so unit-tests don't need the SDK."""
+    from mcp.server.stdio import stdio_server
+
+    app = _build_mcp_app(radar)
+
     async with stdio_server() as (read, write):
         await app.run(read, write, app.create_initialization_options())
 
 
+async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None:
+    """Async streamable-HTTP loop. Long-running, holds RadarServer in memory.
+
+    The transport is the official MCP "streamable HTTP" (protocol
+    2025-03-26+). One backend process serves many clients; ideal for
+    running on a GPU host (gomer / Vast / etc.) with the heavy encoder
+    loaded once.
+
+    Bind to 127.0.0.1 by default in production deployments — perimeter
+    auth comes from an SSH tunnel, NOT from this server. See README for
+    the deployment topology.
+    """
+    import uvicorn
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
+    app = _build_mcp_app(radar)
+
+    session_manager = StreamableHTTPSessionManager(
+        app=app,
+        json_response=True,    # plain JSON-RPC over POST when client is happy
+        stateless=False,       # keep a session — enables long jobs polling
+    )
+
+    async def _handle(scope, receive, send):
+        await session_manager.handle_request(scope, receive, send)
+
+    starlette_app = Starlette(routes=[Mount("/mcp", app=_handle)])
+
+    async with session_manager.run():
+        config = uvicorn.Config(
+            starlette_app, host=host, port=port,
+            log_level="info", access_log=False,
+        )
+        await uvicorn.Server(config).serve()
+
+
 def serve(config_path: Path | None = None) -> None:
-    """Entry point: load corpus + index, register tools, start MCP stdio server."""
+    """Entry point: stdio MCP server. Backwards-compat with single-user
+    pip install path."""
     config = load(config_path)
     radar = RadarServer(config)
     asyncio.run(_run_stdio(radar))
+
+
+def serve_http(host: str, port: int, config_path: Path | None = None) -> None:
+    """Entry point: streamable-HTTP MCP server. Long-running backend mode."""
+    config = load(config_path)
+    radar = RadarServer(config)
+    LOG.info(f"arxiv-radar streamable-HTTP server listening on {host}:{port}")
+    LOG.info(f"  encoder model: {config.embeddings.model}")
+    LOG.info(f"  cache_dir: {config.embeddings.cache_dir}")
+    asyncio.run(_run_streamable_http(radar, host, port))

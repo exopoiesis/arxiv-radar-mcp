@@ -3,8 +3,17 @@
 # Unknown first arg → exec verbatim (handy for debugging shells, python -c, etc.).
 set -e
 
-case "${1:-mcp}" in
+case "${1:-mcp-http}" in
+    mcp-http)
+        # Long-running streamable-HTTP MCP backend (the production mode).
+        # Listens on 0.0.0.0 inside the container; users tunnel in via SSH
+        # so the host port mapping is loopback-only (-p 127.0.0.1:8765:8765).
+        shift
+        exec python -m arxiv_radar_mcp \
+            --transport http --bind 0.0.0.0 --port 8765 "$@"
+        ;;
     mcp)
+        # Stdio mode — for legacy single-shot usage.
         exec python -m arxiv_radar_mcp "${@:2}"
         ;;
     build-cache)

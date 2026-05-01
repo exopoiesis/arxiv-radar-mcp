@@ -25,6 +25,9 @@ sources/
 # Local Claude Code settings (machine-specific)
 .claude/
 
+# Local throw-away scripts (per-repo isolated workspace; see docs/PLAN.md)
+tmp/
+
 # OS junk
 .DS_Store
 Thumbs.db

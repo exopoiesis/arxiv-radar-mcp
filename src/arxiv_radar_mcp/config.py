@@ -40,9 +40,37 @@ class SourceConfig:
 
 @dataclass
 class EmbeddingsConfig:
-    model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    """Bi-encoder used for the dense retrieval index.
+
+    Default: mxbai-embed-large-v1 — best CPU-only English embedding in the
+    sub-1B-param tier (MTEB ~64.7), 1024 dims, ~57 MB cache for 14k papers.
+    See embeddings.py:_QUERY_PREFIX for the registry of models that need
+    instruction-style prefixes.
+
+    target_dim:
+      For models trained with Matryoshka Representation Learning (Qwen3,
+      Nomic, mxbai-v2 …) you can truncate the native embedding to a smaller
+      dim at encode time and re-normalize. Quality drops 1–2 MTEB points per
+      halving but cache size and cosine speed scale linearly. Set to None to
+      keep the model's native dim.
+    """
+    model: str = "mixedbread-ai/mxbai-embed-large-v1"
     cache_dir: Path = field(default_factory=lambda: _default_cache_dir() / "embeddings")
     batch_size: int = 64
+    target_dim: int | None = None
+
+
+@dataclass
+class RerankerConfig:
+    """Cross-encoder reranker applied on top of hybrid (text+semantic) results.
+
+    Cross-encoders score (query, passage) pairs jointly — costly per-pair
+    but dramatically more precise than bi-encoders. We pull `top_k_candidates`
+    from RRF, rerank, return the top-k requested by the caller.
+    """
+    enabled: bool = True
+    model: str = "BAAI/bge-reranker-base"
+    top_k_candidates: int = 50  # how many hybrid candidates feed into the cross-encoder
 
 
 @dataclass
@@ -55,6 +83,7 @@ class ServerConfig:
 class Config:
     sources: list[SourceConfig]
     embeddings: EmbeddingsConfig
+    reranker: RerankerConfig
     server: ServerConfig
 
     @classmethod
@@ -68,21 +97,30 @@ class Config:
                 ),
             ],
             embeddings=EmbeddingsConfig(),
+            reranker=RerankerConfig(),
             server=ServerConfig(),
         )
 
 
 def load(config_path: Path | None = None) -> Config:
-    """Load config from the first existing path in the resolution order, else defaults."""
-    candidate = (
-        config_path
-        or _env_path()
-        or _default_config_path() if _default_config_path().exists() else None
-    )
+    """Load config from the first existing path in the resolution order, else defaults.
+
+    Resolution order:
+      1. explicit `config_path` arg (e.g. CLI `--config`)
+      2. $ARXIV_RADAR_CONFIG env var
+      3. platformdirs default (e.g. ~/.config/arxiv-radar/radar.toml)
+      4. ./radar.toml in cwd
+      5. built-in defaults
+    """
+    candidate: Path | None = config_path or _env_path()
     if candidate is None:
-        cwd = Path.cwd() / "radar.toml"
-        if cwd.exists():
-            candidate = cwd
+        default = _default_config_path()
+        if default.exists():
+            candidate = default
+    if candidate is None:
+        cwd_cfg = Path.cwd() / "radar.toml"
+        if cwd_cfg.exists():
+            candidate = cwd_cfg
 
     if candidate is None or not candidate.exists():
         return Config.defaults()
@@ -110,11 +148,21 @@ def _from_dict(data: dict) -> Config:
         ))
 
     emb_raw = data.get("embeddings", {})
+    emb_defaults = EmbeddingsConfig()
     emb = EmbeddingsConfig(
-        model=emb_raw.get("model", EmbeddingsConfig.model),
+        model=emb_raw.get("model", emb_defaults.model),
         cache_dir=Path(emb_raw["cache_dir"]).expanduser() if emb_raw.get("cache_dir")
-                  else EmbeddingsConfig().cache_dir,
-        batch_size=emb_raw.get("batch_size", 64),
+                  else emb_defaults.cache_dir,
+        batch_size=emb_raw.get("batch_size", emb_defaults.batch_size),
+        target_dim=emb_raw.get("target_dim", emb_defaults.target_dim),
+    )
+
+    rer_raw = data.get("reranker", {})
+    rer_defaults = RerankerConfig()
+    rer = RerankerConfig(
+        enabled=rer_raw.get("enabled", rer_defaults.enabled),
+        model=rer_raw.get("model", rer_defaults.model),
+        top_k_candidates=rer_raw.get("top_k_candidates", rer_defaults.top_k_candidates),
     )
 
     srv_raw = data.get("server", {})
@@ -124,4 +172,4 @@ def _from_dict(data: dict) -> Config:
     )
 
     return Config(sources=sources or Config.defaults().sources,
-                  embeddings=emb, server=srv)
+                  embeddings=emb, reranker=rer, server=srv)

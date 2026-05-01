@@ -26,6 +26,8 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
     "platformdirs>=4.0",
     "httpx>=0.27",
+    "selectolax>=0.3",
+    "pylatexenc>=2.10",
 ]
 
 [project.optional-dependencies]

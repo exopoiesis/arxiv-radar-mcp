@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from arxiv_radar_mcp.config import Config, EmbeddingsConfig, ServerConfig, SourceConfig
+from arxiv_radar_mcp.config import (Config, EmbeddingsConfig, RerankerConfig,
+                                    ServerConfig, SourceConfig)
 
 
 @pytest.fixture
@@ -48,5 +49,8 @@ def local_config(sample_papers_dir: Path, tmp_path: Path) -> Config:
     return Config(
         sources=[SourceConfig(name="ai4chem", type="local", path=sample_papers_dir)],
         embeddings=EmbeddingsConfig(cache_dir=tmp_path / "cache"),
+        # Reranker disabled by default in tests — avoids accidental CrossEncoder
+        # downloads during pytest. Tests that exercise the reranker flip this on.
+        reranker=RerankerConfig(enabled=False),
         server=ServerConfig(),
     )

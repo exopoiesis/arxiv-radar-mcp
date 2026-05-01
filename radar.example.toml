@@ -24,10 +24,36 @@ branch = "main"
 # path = "/home/me/projects/daily-arxiv-polymers"   # reads <path>/data/papers-*.json directly
 
 # --- embeddings --------------------------------------------------------------
+# Bi-encoder used to build dense indexes (abstracts and fulltext both).
+# Production winner per docs/MODEL_BENCHMARKS.md: Qwen3-Embedding-4B native
+# 2560 dim (9/10 recall@1 on the 22-query bench, single-GPU encode in ~7 min).
+# Onboarding default in code is still mxbai-embed-large-v1 — works on CPU
+# without a 9 GB download. Switch via this file when GPU is available.
+#
+# Other tested options (drop-in, just change the name):
+#   mixedbread-ai/mxbai-embed-large-v1     — sub-1B CPU baseline (MTEB ~64.7)
+#   sentence-transformers/all-MiniLM-L6-v2 — tiny / fast / weak (MTEB ~56)
+#   BAAI/bge-small-en-v1.5                 — tiny upgrade from MiniLM (~62)
+#   BAAI/bge-large-en-v1.5                 — peer of mxbai
+#   intfloat/e5-large-v2                   — peer; needs "passage:" prefix (handled)
+#   Qwen/Qwen3-Embedding-4B                — production winner (GPU)
+#   Qwen/Qwen3-Embedding-8B                — slightly larger; matryoshka loss is steeper
+# Models with known query/passage prefixes are auto-prefixed; see
+# embeddings.py:_QUERY_PREFIX for the registry.
 [embeddings]
-model      = "sentence-transformers/all-MiniLM-L6-v2"
+model      = "Qwen/Qwen3-Embedding-4B"
 # cache_dir = "~/.cache/arxiv-radar/embeddings"   # platformdirs default if omitted
-batch_size = 64
+batch_size = 32                                   # bf16 4B fits 32 chunks at seq=512
+
+# --- reranker ----------------------------------------------------------------
+# Cross-encoder reranker is kept in the codebase as a utility class but no
+# longer wired to any MCP tool — see docs/PLAN.md [РЕШЕНИЕ-010]. Reason: on
+# Qwen3-4B-native (1.2 avg rank) the reranker only ceilings at ~2.0, costing
+# 1.5s per query for no precision gain. The settings below are inert today.
+[reranker]
+enabled          = false
+model            = "BAAI/bge-reranker-base"
+top_k_candidates = 50
 
 # --- server ------------------------------------------------------------------
 [server]

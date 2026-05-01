@@ -80,11 +80,35 @@ class ServerConfig:
 
 
 @dataclass
+class RefreshConfig:
+    """Daily auto-refresh of the abstract corpus from the daily-arxiv-* feeds.
+
+    `enabled=True` (default): backend kicks off a background asyncio task
+    that runs `refresh_sources()` every `interval_hours`. For sources whose
+    `path` is a git working tree, the refresher does `git -C path pull`
+    first, picking up new shards (and dropping pruned ones) automatically.
+
+    `full_rebuild=True` (recommended for GPU server): re-encode the entire
+    abstract index after every refresh. Robust to deletions in upstream.
+    Costs ~7 min on RTX 4070 for 14k papers — fine to do nightly.
+
+    `full_rebuild=False` (recommended for CPU laptop): incremental — encode
+    only new arxiv_ids, append to embeddings.npy. Cheap (~10 sec/50 papers
+    on CPU), but can drift from upstream when papers get archived/deleted
+    upstream. User can flip to full periodically via `--build-cache`.
+    """
+    enabled: bool = True
+    interval_hours: int = 24
+    full_rebuild: bool = True
+
+
+@dataclass
 class Config:
     sources: list[SourceConfig]
     embeddings: EmbeddingsConfig
     reranker: RerankerConfig
     server: ServerConfig
+    refresh: RefreshConfig
 
     @classmethod
     def defaults(cls) -> "Config":
@@ -99,6 +123,7 @@ class Config:
             embeddings=EmbeddingsConfig(),
             reranker=RerankerConfig(),
             server=ServerConfig(),
+            refresh=RefreshConfig(),
         )
 
 
@@ -171,5 +196,13 @@ def _from_dict(data: dict) -> Config:
         hybrid_rrf_k=srv_raw.get("hybrid_rrf_k", 60),
     )
 
+    ref_raw = data.get("refresh", {})
+    ref_defaults = RefreshConfig()
+    ref = RefreshConfig(
+        enabled=ref_raw.get("enabled", ref_defaults.enabled),
+        interval_hours=ref_raw.get("interval_hours", ref_defaults.interval_hours),
+        full_rebuild=ref_raw.get("full_rebuild", ref_defaults.full_rebuild),
+    )
+
     return Config(sources=sources or Config.defaults().sources,
-                  embeddings=emb, reranker=rer, server=srv)
+                  embeddings=emb, reranker=rer, server=srv, refresh=ref)

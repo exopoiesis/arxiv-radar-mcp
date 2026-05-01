@@ -339,6 +339,59 @@ reindex queued (or rejected — TBD during impl).
 — enough for one fetch + one reindex in parallel. Long-term, if heavy
 GPU work piles up, swap for an external worker (Celery/RQ) — but YAGNI.
 
+## [РЕШЕНИЕ-016] Daily refresh — git pull + diff + atomic update
+
+The `daily-arxiv-*` repos publish a fresh `papers-YYYY-MM.json` shard
+each morning (GitHub Actions cron 0 0 * * *). Without an in-server
+refresh loop, the abstract corpus drifts more stale every day. Manual
+`--build-cache` puts that work on the user.
+
+`refresh.py` runs inside the long-running backend on a configurable
+schedule (`[refresh] interval_hours = 24`). One round:
+
+1. **`git pull`** for sources whose `path` is a git working tree
+   (sparse-checkout or full clone). The recommended setup on GPU hosts
+   is sparse-clone of `data/` + `tags/` only — ~50 MB instead of ~500 MB
+   that the full repo (with rendered docs/abstracts/) would weigh.
+2. **Reload corpus** via existing `corpus.load_all()`.
+3. **Diff** against `radar.papers`: emit `added` and `deleted` sets.
+4. **Strategy decision:**
+   - `full_rebuild=True` OR any deletions → re-encode all abstracts.
+     Server / GPU mode: nightly full rebuild (~7 min on RTX 4070
+     for 14k papers). Robust to upstream prunes.
+   - else (incremental) → encode only `added` arxiv_ids, `np.concatenate`
+     to existing matrix, merge into `row_for`. Local / CPU mode:
+     ~10 sec per 50 new papers. Drifts when papers are pruned upstream
+     — user runs `--build-cache` periodically to resync.
+5. **Atomic write**: `embeddings.npy.tmp` + `index.json.tmp` → rename.
+   Concurrent searches see either the old or new state, never torn.
+6. **Hot-swap** `radar.abstract_index` and `radar.papers` in-place.
+
+Encoder lock (`acquire_reindex_lock` from `JobRegistry`) is shared with
+`reindex` — a single encoder instance can't serve two passes at once.
+Refresh that collides with reindex is silently skipped this tick;
+manual `refresh_abstracts` tool returns `{error: "encoder busy"}`.
+
+Bootstrap behaviour at backend startup:
+  * `abstract_index` exists and `embeddings.npy` younger than interval →
+    sleep until next tick.
+  * Otherwise → kick off an immediate full-rebuild refresh, then enter
+    the regular loop.
+
+Manual triggers:
+  * **MCP tool `refresh_abstracts(force_full=false)`** — returns a job_id;
+    Claude can poll with `job_status`.
+  * **CLI `arxiv-radar-mcp --build-cache`** — synchronous full rebuild,
+    same effect as `force_full=true` minus the job wrapper. Useful for
+    initial provisioning.
+
+Rejected designs:
+  * Per-source incremental with deletion tracking — too fragile, every
+    edge case (revisions, archive moves, fork resyncs) needs explicit
+    handling. Full rebuild is dumb-and-cheap.
+  * Cron inside the container — couples lifecycle of the backend to
+    cron daemon presence. asyncio task in the same process is simpler.
+
 ## [РЕШЕНИЕ-009] Repo-local `tmp/` for throw-away scripts
 
 Bash helper scripts (venv setup, smoke runs, ad-hoc one-shots) live in
@@ -386,7 +439,9 @@ referenced from docs), promote it out of `tmp/` into a real path
 | 8 | Fulltext fetcher (HTML+LaTeX cascade, [РЕШЕНИЕ-013]), chunker by headings ([РЕШЕНИЕ-014]) | done (2026-05-01) |
 | 9 | Async jobs registry ([РЕШЕНИЕ-015]) + new MCP tools (search_paper_*, fetch_papers, reindex, job_status, job_list) | done (2026-05-01) |
 | 10 | Build GPU Docker image on gomer, run scenario tests for fulltext search | done (2026-05-01) — 22-chunk reindex passes, all 3 search modes return relevant hits |
-| 3 | First user: connect to Claude Desktop, dogfood for a week | pending — gated on 7-10 |
+| 11 | Production deploy: streamable-HTTP transport + SSH-tunnel proxy + long-running backend | done (2026-05-01) — `--remote user@host`, container `--restart unless-stopped`, perimeter via SSH keys |
+| 12 | Daily auto-refresh of abstract corpus ([РЕШЕНИЕ-016]) — `refresh.py`, scheduler loop, MCP tool refresh_abstracts | done (2026-05-01) |
+| 3 | First user: connect to Claude Desktop, dogfood for a week | pending — gated on 7-12 |
 | 4 | Add `physics` / `polymers` domain feeds as they appear | pending |
 | 5 | BM25 upgrade if text relevance complaints surface | pending |
 | 6 | PyPI release | pending |
@@ -408,11 +463,13 @@ src/arxiv_radar_mcp/
 ├── chunker.py         # split markdown by ## headings; sub-split sections >max_seq_length
 ├── fulltext_index.py  # reindex (full rebuild); search_paper_text/semantic; similar_to_paper
 ├── jobs.py            # JobRegistry: ThreadPoolExecutor + persistent jobs/<id>.json + lockfile
+├── refresh.py         # daily refresh: git pull → diff → encode new → atomic swap ([РЕШЕНИЕ-016])
+├── proxy.py           # local stdio→remote-HTTP proxy with SSH tunnel (--remote mode)
 ├── fulltext_cli.py    # `python -m arxiv_radar_mcp.fulltext_cli` — fetch helper for in-container use
 ├── reindex_cli.py     # `python -m arxiv_radar_mcp.reindex_cli` — reindex helper for in-container use
-└── server.py          # RadarServer holds {abstract_index, fulltext_index, job_registry};
-                       # TOOL_SPECS catalogue (14 tools); _dispatch routes name→method;
-                       # serve() runs mcp stdio
+└── server.py          # RadarServer holds {abstract_index, fulltext_index, jobs};
+                       # TOOL_SPECS (15 tools); serve() stdio + serve_http() streamable-HTTP;
+                       # _refresh_loop() asyncio background task
 
 Dockerfile             # GPU image: pytorch/cuda12.4 + this code, ~10 GB
 .dockerignore          # strips tests/tmp/docs/.venv from build context

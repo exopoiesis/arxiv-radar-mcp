@@ -35,6 +35,7 @@ from arxiv_radar_mcp.fulltext_index import (FULLTEXT_MAX_SEQ_LENGTH,
                                             search_paper_text,
                                             similar_to_paper)
 from arxiv_radar_mcp.jobs import JobError, JobHandle, JobRegistry
+from arxiv_radar_mcp.refresh import refresh_sources
 from arxiv_radar_mcp.search import (search_semantic, search_text, similar_to)
 
 LOG = logging.getLogger(__name__)
@@ -211,6 +212,31 @@ class RadarServer:
         return {"job_id": job_id, "n_total": len(arxiv_ids),
                 "kind": "fetch_papers"}
 
+    def refresh_abstracts(self, force_full: bool = False) -> dict:
+        """Submit a background refresh job. Returns {job_id} immediately.
+
+        Pulls the daily-arxiv-* feeds (git pull where applicable),
+        diffs against the in-memory corpus, encodes new abstracts, and
+        atomically swaps the abstract index. By default uses the strategy
+        from radar.toml ([refresh] full_rebuild = ...). Pass force_full=true
+        to override and re-encode everything.
+
+        Refuses if a reindex is already running (encoder lock held).
+        """
+        if not self.jobs.acquire_reindex_lock():
+            return {"error": "encoder busy (reindex/refresh in progress); "
+                             "try again when it completes"}
+
+        full = bool(force_full or self.config.refresh.full_rebuild)
+        job_id = self.jobs.submit(
+            kind="refresh_abstracts",
+            fn=lambda h: self._do_refresh(h, full_rebuild=full),
+            args={"full_rebuild": full},
+            n_total=0,
+        )
+        return {"job_id": job_id, "kind": "refresh_abstracts",
+                "strategy_planned": "full" if full else "incremental"}
+
     def reindex(self) -> dict:
         """Submit a background reindex job. Returns {job_id} immediately.
 
@@ -278,6 +304,16 @@ class RadarServer:
             "failed": failed,
             "source_breakdown": dict(source_counts),
         }
+
+    def _do_refresh(self, handle: JobHandle, *, full_rebuild: bool) -> dict:
+        try:
+            result = refresh_sources(self, full_rebuild=full_rebuild)
+        except Exception as e:  # noqa: BLE001
+            self.jobs.release_reindex_lock()
+            raise JobError(f"refresh failed: {type(e).__name__}: {e}") from e
+        else:
+            self.jobs.release_reindex_lock()
+        return result
 
     def _do_reindex(self, handle: JobHandle) -> dict:
         try:
@@ -522,6 +558,23 @@ TOOL_SPECS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "refresh_abstracts",
+        "description": (
+            "Pull the latest abstracts from the daily-arxiv-* feeds and "
+            "update the abstract embedding index. Runs in the background "
+            "and returns {job_id} immediately; poll with job_status. "
+            "Strategy is incremental by default (encode only new arxiv_ids); "
+            "pass force_full=true to re-encode everything (slower, recovers "
+            "from upstream prunes)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "force_full": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
         "name": "job_status",
         "description": (
             "Inspect a background job (fetch_papers or reindex). State is "
@@ -604,14 +657,82 @@ def _build_mcp_app(radar: RadarServer):
     return app
 
 
+async def _refresh_loop(radar: RadarServer) -> None:
+    """Background daily refresh of the abstract corpus.
+
+    Bootstrap: if there's no cache or it's older than `interval_hours`,
+    do one refresh immediately (full rebuild) so the server has data.
+    Then sleep `interval_hours`, refresh, repeat.
+    """
+    import time
+
+    interval_seconds = radar.config.refresh.interval_hours * 3600
+    full = radar.config.refresh.full_rebuild
+
+    if _should_refresh_at_boot(radar):
+        LOG.info("refresh: bootstrap needed (no/stale abstract cache)")
+        try:
+            result = await asyncio.to_thread(_blocking_refresh, radar, True)
+            LOG.info(f"refresh: bootstrap result: {result}")
+        except Exception as e:  # noqa: BLE001
+            LOG.exception(f"refresh: bootstrap failed: {e}")
+
+    LOG.info(f"refresh loop: every {radar.config.refresh.interval_hours}h, "
+             f"full_rebuild={full}")
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            LOG.info("refresh loop: cancelled")
+            return
+        try:
+            result = await asyncio.to_thread(_blocking_refresh, radar, full)
+            LOG.info(f"refresh: result: {result}")
+        except Exception as e:  # noqa: BLE001
+            LOG.exception(f"refresh tick failed: {e}; retry next interval")
+
+
+def _should_refresh_at_boot(radar: RadarServer) -> bool:
+    """True when the abstract cache is missing or older than interval."""
+    import time
+
+    if radar.abstract_index is None:
+        return True
+    npy = radar.config.embeddings.cache_dir / "embeddings.npy"
+    if not npy.exists():
+        return True
+    age_seconds = time.time() - npy.stat().st_mtime
+    return age_seconds > radar.config.refresh.interval_hours * 3600
+
+
+def _blocking_refresh(radar: RadarServer, full_rebuild: bool) -> dict:
+    """Synchronous refresh under the encoder lock. Called via asyncio.to_thread
+    from the refresh loop so the event loop stays responsive."""
+    if not radar.jobs.acquire_reindex_lock():
+        return {"skipped": "encoder busy"}
+    try:
+        return refresh_sources(radar, full_rebuild=full_rebuild)
+    finally:
+        radar.jobs.release_reindex_lock()
+
+
 async def _run_stdio(radar: RadarServer) -> None:
     """Async stdio loop. Imported lazily so unit-tests don't need the SDK."""
     from mcp.server.stdio import stdio_server
 
     app = _build_mcp_app(radar)
 
-    async with stdio_server() as (read, write):
-        await app.run(read, write, app.create_initialization_options())
+    refresh_task = None
+    if radar.config.refresh.enabled:
+        refresh_task = asyncio.create_task(_refresh_loop(radar),
+                                           name="abstract-refresh")
+    try:
+        async with stdio_server() as (read, write):
+            await app.run(read, write, app.create_initialization_options())
+    finally:
+        if refresh_task is not None:
+            refresh_task.cancel()
 
 
 async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None:
@@ -644,12 +765,21 @@ async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None
 
     starlette_app = Starlette(routes=[Mount("/mcp", app=_handle)])
 
-    async with session_manager.run():
-        config = uvicorn.Config(
-            starlette_app, host=host, port=port,
-            log_level="info", access_log=False,
-        )
-        await uvicorn.Server(config).serve()
+    refresh_task = None
+    if radar.config.refresh.enabled:
+        refresh_task = asyncio.create_task(_refresh_loop(radar),
+                                           name="abstract-refresh")
+
+    try:
+        async with session_manager.run():
+            config = uvicorn.Config(
+                starlette_app, host=host, port=port,
+                log_level="info", access_log=False,
+            )
+            await uvicorn.Server(config).serve()
+    finally:
+        if refresh_task is not None:
+            refresh_task.cancel()
 
 
 def serve(config_path: Path | None = None) -> None:

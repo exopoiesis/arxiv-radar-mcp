@@ -178,9 +178,14 @@ class Encoder:
             LOG.info(f"loading bi-encoder {self.model_name}...")
             self._model = SentenceTransformer(self.model_name)
 
-    def encode_query(self, text: str) -> np.ndarray:
-        """Encode a single query. L2-normalized, with model-specific prefix."""
+    def encode_query(self, text: str, max_seq_length: int = 512) -> np.ndarray:
+        """Encode a single query. L2-normalized, with model-specific prefix.
+
+        Same `max_seq_length=512` default as encode_passages — see that
+        method's docstring for why this is required for Qwen3.
+        """
         self._ensure_loaded()
+        self._model.max_seq_length = max_seq_length
         prefixed = query_prefix(self.model_name) + text
         vec = self._model.encode(  # type: ignore[union-attr]
             [prefixed],
@@ -189,15 +194,35 @@ class Encoder:
         return _maybe_truncate(vec, self.config.embeddings.target_dim)
 
     def encode_passages(
-        self, texts: list[str], show_progress: bool = True,
+        self,
+        texts: list[str],
+        show_progress: bool = True,
+        max_seq_length: int = 512,
+        batch_size: int | None = None,
     ) -> np.ndarray:
-        """Encode a batch of passages. L2-normalized, with model prefix if any."""
+        """Encode a batch of passages. L2-normalized, with model prefix if any.
+
+        `max_seq_length` defaults to 512 — fits arxiv abstracts (~150-300
+        tokens average) with headroom. Caller can pass a larger value (e.g.
+        12288 for full-text section chunks); fulltext_index does this
+        per-bucket. **Critical**: Qwen3 ships with max_seq_length=32768,
+        and sentence-transformers `padding="max_length"` will pad every
+        batch to that length on some configs, costing ~30-40× slowdown on
+        short inputs. Setting this attribute on the loaded model before
+        encode is the documented fix.
+
+        `batch_size` overrides config.embeddings.batch_size for this call.
+        """
         self._ensure_loaded()
+        # Set the per-call seq window (no-op when already at this length).
+        self._model.max_seq_length = max_seq_length
+
         prefix = passage_prefix(self.model_name)
         prepared = [prefix + t for t in texts] if prefix else texts
+        bs = batch_size if batch_size is not None else self.config.embeddings.batch_size
         matrix = self._model.encode(  # type: ignore[union-attr]
             prepared,
-            batch_size=self.config.embeddings.batch_size,
+            batch_size=bs,
             show_progress_bar=show_progress,
             convert_to_numpy=True,
             normalize_embeddings=True,

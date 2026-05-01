@@ -22,7 +22,7 @@ def test_build_mcp_app_uses_tool_specs(local_config):
         assert app is not None
         # We can't easily call into the handler without an MCP context,
         # but TOOL_SPECS itself is the source of truth — guard against drift.
-        assert len(TOOL_SPECS) == 14
+        assert len(TOOL_SPECS) == 15
     finally:
         radar.jobs.shutdown()
 

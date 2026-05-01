@@ -59,3 +59,23 @@ top_k_candidates = 50
 [server]
 default_k    = 10    # fallback k when a tool is invoked without one
 hybrid_rrf_k = 60    # RRF constant; 60 is the canonical default
+
+# --- refresh -----------------------------------------------------------------
+# Daily auto-refresh of the abstract corpus from the daily-arxiv-* feeds.
+# Long-running backend kicks off a background loop every interval_hours.
+#
+# For sources where path/.git exists, the refresher runs `git -C path pull`
+# first — sparse-checkout setups stay in sync with upstream automatically.
+#
+# full_rebuild = true   → re-encode entire abstract index after each refresh.
+#                          Recommended for GPU servers (~7 min on RTX 4070
+#                          per 14k papers). Robust to upstream deletions.
+# full_rebuild = false  → incremental: only encode new arxiv_ids, append to
+#                          embeddings.npy. Recommended for CPU laptops
+#                          (~10 sec / 50 new papers). Drifts slightly from
+#                          upstream when papers get pruned; run --build-cache
+#                          periodically to resync.
+[refresh]
+enabled        = true
+interval_hours = 24
+full_rebuild   = true

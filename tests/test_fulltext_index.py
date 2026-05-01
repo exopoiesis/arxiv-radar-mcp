@@ -227,7 +227,8 @@ class _FakeEncoder:
     def _ensure_loaded(self):
         pass
 
-    def encode_passages(self, texts, show_progress=True):
+    def encode_passages(self, texts, show_progress=True,
+                        max_seq_length=512, batch_size=None):
         # Each chunk → unique one-hot direction in self.dim space.
         n = len(texts)
         dim = max(n, self.dim)

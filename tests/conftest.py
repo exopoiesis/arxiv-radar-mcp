@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from arxiv_radar_mcp.config import (Config, EmbeddingsConfig, RerankerConfig,
-                                    ServerConfig, SourceConfig)
+from arxiv_radar_mcp.config import (Config, EmbeddingsConfig, RefreshConfig,
+                                    RerankerConfig, ServerConfig, SourceConfig)
 
 
 @pytest.fixture
@@ -53,4 +53,7 @@ def local_config(sample_papers_dir: Path, tmp_path: Path) -> Config:
         # downloads during pytest. Tests that exercise the reranker flip this on.
         reranker=RerankerConfig(enabled=False),
         server=ServerConfig(),
+        # Refresh disabled in unit tests so the asyncio loop never spins up
+        # and tries to fetch from the network or run the encoder.
+        refresh=RefreshConfig(enabled=False),
     )

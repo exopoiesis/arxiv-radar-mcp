@@ -250,11 +250,13 @@ def _encode_bucketed(
             continue
         texts = [chunks[i].text for i in original_idx_in_bucket]
 
-        _set_max_seq_length(encoder, seq_len)
-        encoder.config.embeddings.batch_size = batch_size
-
         t0 = time.time()
-        bucket_matrix = encoder.encode_passages(texts, show_progress=False)
+        bucket_matrix = encoder.encode_passages(
+            texts,
+            show_progress=False,
+            max_seq_length=seq_len,
+            batch_size=batch_size,
+        )
         elapsed = time.time() - t0
 
         for j, orig_i in enumerate(original_idx_in_bucket):

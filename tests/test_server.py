@@ -30,8 +30,9 @@ EXPECTED_TOOLS = {
     "paper_info", "list_tags", "list_domains",
     # fulltext (3)
     "search_paper_text", "search_paper_semantic", "similar_to_paper",
-    # async admin (5)
-    "fetch_papers", "reindex", "job_status", "job_list", "list_enriched",
+    # async admin (6)
+    "fetch_papers", "reindex", "refresh_abstracts",
+    "job_status", "job_list", "list_enriched",
 }
 
 

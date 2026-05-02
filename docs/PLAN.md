@@ -76,6 +76,33 @@ Qwen3 prefix: `"Instruct: Given a web search query, retrieve relevant
 passages that answer the query\nQuery: "`. Forgetting them silently
 costs 5–15% recall.
 
+**Three encoder gotchas baked into `Encoder._ensure_loaded`** (any
+regression here costs 3-50× wall time and is hard to diagnose without
+profiling):
+
+1. **Explicit `model.to(dtype=torch.bfloat16)` after `SentenceTransformer(...)`.**
+   transformers 5.7+ no longer unifies dtypes implicitly: weights load
+   as bf16 (HF safetensors), activations stay fp32 by default →
+   `RuntimeError: expected mat1 and mat2 to have the same dtype, but
+   got: float != c10::BFloat16` on first forward through a `Linear`
+   layer. CPU path stays fp32 — bf16 on CPU has no tensor-core path
+   and is much slower.
+
+2. **`max_seq_length` must be set per-call, not at load time.** Qwen3
+   ships at 32 768; abstract encoding needs 512, fulltext-chunk encoding
+   needs 4096 per the bucketing scheme. `Encoder.encode_passages` /
+   `encode_query` accept `max_seq_length=` and apply it on the model
+   before each batch. (Mutating the model attribute is fine — it's
+   just a local sequence-truncation hint, not a graph rebuild.)
+
+3. **`_ensure_loaded` must be thread-safe.** Refresh loop, warm-up task,
+   and reindex jobs all live on different anyio worker threads. Without
+   a lock, two of them can race the load and end up with **two**
+   SentenceTransformer instances in GPU memory — 2× 8 GB on a 12 GB
+   card spills to host memory and slows every subsequent encode 3-50×
+   per bucket. Standard double-checked locking pattern: fast path no
+   lock, lock, re-check, load, publish only when complete.
+
 ## [РЕШЕНИЕ-004] Cache layout
 
 Single npy + index.json sidecar:
@@ -250,7 +277,7 @@ The abstract corpus (~14k papers, growing) and the fulltext corpus
     embeddings.npy              # (N_papers, 2560)  — title + abstract, max_seq=512
     index.json                  # {model, dims, n, max_seq_length, row_for: {arxiv_id: int}}
   fulltext/
-    embeddings.npy              # (N_chunks, 2560)  — heading-chunked, max_seq=12288
+    embeddings.npy              # (N_chunks, 2560)  — heading-chunked, max_seq=4096
     index.json                  # {model, dims, n, max_seq_length, chunks: [{arxiv_id, section, chunk_idx, n_chars}, ...]}
     sources/<arxiv_id>.md       # cached full markdown (one file per enriched paper)
     sources/<arxiv_id>.meta.json
@@ -301,15 +328,32 @@ restriction, not embedding-level signal. Tags are not encoded into
 embeddings (would dilute semantic signal); they're a sub-corpus
 selector applied before ranking.
 
-**Chunking:** split fulltext markdown by `## headings`. If a section
-fits in `max_seq_length=12288` (most do — typical 5-15k word papers
-have sections of 1-4k words), one chunk = one section. If a section
-exceeds 12288 tokens (long Discussions in reviews), sub-split by
-paragraphs, no overlap. Each chunk row carries `(arxiv_id, section
-name, chunk_idx)` so search results can attribute "found in Methods
-of paper X". 12K is the chosen target because it covers the long tail
-without forcing chunking on most sections, and Qwen3-4B bf16 + 12K
-seq length fits in gomer's 12 GB VRAM at batch_size=4.
+**Chunking:** split fulltext markdown by `## headings`, `max_tokens=4096`,
+paragraph-aligned overlap of ~12% (≈ 500 tokens carry-tail between
+adjacent sub-chunks of the same section). Each chunk row carries
+`(arxiv_id, section_name, chunk_idx)` so search results attribute
+"found in Methods of paper X". See `docs/MODEL_BENCHMARKS.md` for the
+empirical run that fixed `max_tokens=4096` (the original 12 288 made
+long-bucket encoding 51 s/chunk on RTX 4070 — 96% of reindex wall time
+on 12% of chunks).
+
+**Do not raise `max_tokens` back up.** The 12 288 trial was kept long
+enough to hit a real benchmark, and 4096 is strictly better on:
+encode wall time (3.3× faster), retrieval granularity (top-k now points
+at sub-section level, not a section-as-a-whole average), and overlap
+captures boundary answers anyway. A larger window only helps if a
+single query needs >4k tokens of context to be answered correctly,
+which we have not observed.
+
+**Junk section filter** ([fulltext_index.is_junk_section]):
+`References`, `Acknowledgments`, `Bibliography`, `Data availability`,
+`Author contributions`, `Funding`, `Conflict of interest`,
+`Supplementary [Material|Information]`, `Appendix [A-Z]` are demoted
+in `search_paper_*`. They have high keyword density (cited papers,
+authors, affiliations) but rarely match user intent. `Header` deliberately
+stays clean — it carries title + abstract, often the right hit. Filter
+oversamples top-k×4 candidates, returns clean first; junk only fills
+the tail when filtering would leave fewer than k results.
 
 ## [РЕШЕНИЕ-015] Async jobs for fetch_papers and reindex
 
@@ -441,7 +485,8 @@ referenced from docs), promote it out of `tmp/` into a real path
 | 10 | Build GPU Docker image on gomer, run scenario tests for fulltext search | done (2026-05-01) — 22-chunk reindex passes, all 3 search modes return relevant hits |
 | 11 | Production deploy: streamable-HTTP transport + SSH-tunnel proxy + long-running backend | done (2026-05-01) — `--remote user@host`, container `--restart unless-stopped`, perimeter via SSH keys |
 | 12 | Daily auto-refresh of abstract corpus ([РЕШЕНИЕ-016]) — `refresh.py`, scheduler loop, MCP tool refresh_abstracts | done (2026-05-01) |
-| 3 | First user: connect to Claude Desktop, dogfood for a week | pending — gated on 7-12 |
+| 13 | Production polish from W1 e2e: junk-section filter, chunker max_tokens 12 288→4 096 + paragraph overlap, encoder warm-up, bf16 cast, thread-lock | done (2026-05-02) — reindex 954 s → 287 s on 16 papers; junk hits 7/15 → 0/15. See `docs/MODEL_BENCHMARKS.md` |
+| 3 | First user: connect to Claude Desktop, dogfood for a week | pending — gated on 7-13 |
 | 4 | Add `physics` / `polymers` domain feeds as they appear | pending |
 | 5 | BM25 upgrade if text relevance complaints surface | pending |
 | 6 | PyPI release | pending |

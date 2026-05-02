@@ -298,6 +298,154 @@ enable.
 
 ---
 
+## Production rebalance — 2026-05-02 (W1 verification e2e)
+
+After the first full e2e test on real chemistry papers (D:/home/ignat/
+project-third-matter/knowledge/W1_VERIFICATION_2026-05-01.md context — 3
+queries about proton transfer / MSD / VDOS, fetched 13/15 papers via
+HTML or LaTeX) we hit two production issues that the synthetic 3-paper
+benchmark above didn't surface:
+
+  * Top-k of `search_paper_*` was 7/15 junk chunks (References,
+    Acknowledgments, Data availability, Appendix [A-Z]). High keyword
+    density → high cosine, but useless to the user.
+  * Reindex on a real 16-paper corpus took 16 minutes (954 s).
+    Long-bucket chunks at `max_seq=12288` cost 51 s/chunk vs ≈0.2 s
+    for short — and a real corpus has a non-trivial fraction of long
+    sections (whole Methods on a 5-page paper).
+
+Five orthogonal fixes shipped together (commit `26e1a7d`):
+
+### 1. Junk section filter (search_paper_*)
+
+`is_junk_section(name)` strips numbering/Roman prefixes and matches
+against a regex of citations/admin section titles (References,
+Acknowledgments, Bibliography, Data availability, Author contributions,
+Funding, Conflict of interest, Supplementary [Material|Information],
+Appendix [A-Z]). `search_paper_text` and `search_paper_semantic`
+oversample top-k×4 candidates, push junk to a fallback list, return
+clean hits first; junk only fills the tail when the corpus is so junk-
+heavy that filtering would leave fewer than k clean hits. `Header`
+deliberately stays clean — it carries title + abstract, often the right
+hit. Empirical: W1 e2e top-k went from 7/15 junk → **0/15 junk**.
+
+### 2. Chunker rebalance: max_tokens 12 288 → 4 096, +12% paragraph overlap
+
+The previous 12 288 chunk size meant entire Methods sections of a
+5-page paper landed in **one** embedding row — the cosine averaged
+intro/details/results into one vector, losing sub-section granularity.
+Plus the encode cost was disproportionate (51 s/chunk on long bucket).
+
+New defaults:
+  * `chunker.max_tokens = 4096` — covers ~90th percentile of arxiv
+    sections without splitting; longer sections sub-split with paragraph-
+    aligned overlap (carry trailing paragraphs of chunk N into start of
+    chunk N+1, up to ~12% of max_tokens ≈ 500 tokens).
+  * `_REINDEX_BUCKETS` updated to (≤512, ≤2048, ≤4096) — long bucket
+    encodes at seq=4096, batch=8.
+  * Overlap is paragraph-aligned (no mid-word splits) and bounded
+    (`split_long_section` carry-tail loop guarantees `n_chunks ≤ n_paragraphs`).
+
+**Do not raise `max_tokens` back up** without re-measuring. The reasons
+to keep it at 4096:
+
+  | Cost dimension | At max=12288 | At max=4096 |
+  |---|---:|---:|
+  | Long-bucket per-chunk encode | 51 s | 9 s |
+  | Reindex on 16-paper corpus | 954 s | 287 s |
+  | Index size on same corpus | 152 chunks | 166 chunks (+9% rows) |
+  | Section retrieval granularity | "Methods as a whole" | "Methods sub-section X" |
+  | Boundary-answer recall | depends on luck | overlap captures it |
+
+Going back to 12288 only makes sense if a real query consistently needs
+>4k tokens of context to be answered correctly — we have not seen that
+case. Long-bucket encode quadratic-attention cost is the main reason
+to keep it at 4096.
+
+### 3. Encoder warm-up at backend startup
+
+`_warmup_encoder` runs one dummy `encode_query("warmup")` on a worker
+thread at backend startup. Before this, the user's first real query
+paid the ~25-30 sec SentenceTransformer cold-load. Failure path: log
+warning and continue — the first query will pay the cost itself, not a
+hard fail. W1 e2e first paper-search query: 29 sec → 0.5 sec.
+
+### 4. Explicit `model.to(dtype=torch.bfloat16)` after load
+
+transformers 5.7 stopped doing partial dtype unification on Qwen3:
+weights load as bf16 but activations stay fp32, causing
+`RuntimeError: expected mat1 and mat2 to have the same dtype, but got
+float != c10::BFloat16` inside Linear layers on first forward. Explicit
+cast unifies the pipeline. CPU path stays fp32 (bf16 on CPU is
+catastrophically slow, no tensor-core acceleration).
+
+### 5. Thread-lock for `_ensure_loaded` (race fix)
+
+Refresh loop, warm-up task, and reindex jobs all run on different anyio
+worker threads. Without a lock, two of them could each see
+`self._model is None` and call `SentenceTransformer(...)` concurrently
+— **two model instances** in GPU memory. Two × Qwen3-4B bf16 = 16 GB on
+a 12 GB card → host-memory spillover → 3-50× slower encoding per
+bucket. Standard double-checked locking (fast path no lock, lock,
+re-check, load, publish only when complete) fixes it.
+
+This race actually fired between warm-up and bootstrap-refresh on first
+restart and slowed the first reindex from expected ~290 s to 727 s.
+**The thread-lock is the single most important fix in the bundle** in
+absolute wall-time terms — without it, items 1-3 don't show their
+expected speedup.
+
+### Run 2026-05-02 — W1 e2e full loop
+
+16-paper corpus (3 from previous synthetic run + 13 fetched fresh
+during W1 e2e), 166 chunks total, RTX 4070 with bf16 cast, thread-lock
+fix in place:
+
+| Bucket | n chunks | wall | per-chunk |
+|---|---|---|---|
+| ≤512t | 131 | 31.6 s | 0.24 s/chunk |
+| ≤2048t | 9 | 13.0 s | 1.44 s/chunk |
+| ≤4096t | 26 | 242.5 s | 9.33 s/chunk |
+| **total encode** | 166 | **287 s** | — |
+
+End-to-end loop time on the 3 W1 verification queries:
+
+| Stage | 2026-05-01 baseline | 2026-05-02 polish | Speedup |
+|---|---:|---:|---:|
+| Stage 1 — 3× search_abstract_semantic | 0.5 s | 0.5 s | — |
+| Stage 2 — fetch_papers (15 ids) | 12 s | 12 s | — |
+| Stage 3 — reindex (16 papers / 166 chunks) | **954 s** | **287 s** | **3.3×** |
+| Stage 4 — 3× search_paper_semantic | 29 s (cold) | 0.5 s (warm) | **58×** |
+| **Total e2e** | **~16.5 min** | **~5 min** | **3.3×** |
+
+Search quality on the W1 corpus (post-fix):
+  * **Q1 "Zundel Eigen mechanism"** top-2 → S10 chunk with the
+    Landau-Zener probability formula `$$P_{ij}^{LZ}=\exp(-π/2ℏ\sqrt{...})$$`
+    — sub-section granularity working, semantic cosine pulled the
+    formula chunk above the abstract.
+  * **Q2 "MSD diffusion AIMD water"** top-3 → Hydroxide Mobility paper
+    (Header) — directly relevant.
+  * **Q3 "VDOS O-H stretch"** top-2 → "Table summarizes fitting results.
+    The incoherent VDOS is dominated by H2O" — concrete result-table
+    chunk, not averaged Methods.
+  * Junk hits: 0/15 across all three queries (was 7/15 pre-filter).
+
+### Extrapolation to scale
+
+| Corpus | Estimate (RTX 4070 cold-start) |
+|---|---|
+| 16 papers (this run) | 287 s = 5 min |
+| 50 papers (typical "research week") | ~15 min |
+| 100 papers (small literature project) | ~30 min |
+| 300 papers (paper-deep dive) | ~90 min |
+
+Linear scaling holds because no bucket is GPU-bound at our batch sizes
+— we're seq-length-bound. The thread-lock fix unlocks this scaling;
+without it the GPU spillover would make 100-paper reindex effectively
+infeasible.
+
+---
+
 ## Model wishlist for future evaluation
 
 Recorded for posterity — recheck quarterly as new models ship.

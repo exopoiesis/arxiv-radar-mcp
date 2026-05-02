@@ -452,6 +452,51 @@ referenced from docs), promote it out of `tmp/` into a real path
 
 ---
 
+## Outstanding work — next session pickup
+
+The 2026-05-02 session ended with backend production-ready on gomer
+(image `a0a8a85d1a41`, 14k abstracts indexed, refresh loop active,
+HTTP transport via SSH tunnel working, 181 tests green, 5 commits
+pushed to origin/main). Nothing below blocks Phase 3 dogfood — they're
+quality-of-life, scale-validation, or hardening items for after the
+first user runs.
+
+Priority order (top first):
+
+| # | Item | Size | Trigger / when |
+|---|------|------|----------------|
+| 1 | **Stress test reindex on 50-100 fetched papers** — extrapolation said ~30 min, want to confirm no OOM, no torn-write, no encoder lock starvation; capture real bucket distribution on a real corpus | 30 min run + diagnose | before Phase 3 dogfood — sets user expectations |
+| 2 | **Quickstart for CPU users in README** — 5-min flow from `pip install -e .` to first query against mxbai-large abstracts (no GPU). Includes Claude Desktop config snippet for the local mode | ~1 hour | before Phase 3 — most non-Игнат users will start here |
+| 3 | **Troubleshooting section in README** — common failures: SSH tunnel won't open, backend hangs on first model download, named volume disk full, `git pull` fails inside container, MCP client times out on long reindex | ~1 hour | as user pain reports come in; seed it now with what we already hit (race condition, dtype mismatch, max_seq_length default) |
+| 4 | **GitHub Actions CI** — pytest matrix on push/PR, py 3.11 + 3.12 | ~30 LOC YAML | before public traffic |
+| 5 | **PyPI release** (Phase 6) | ~1 day — version policy, license review, README rendering | after dogfood feedback |
+| 6 | **Multi-source feeds** (Phase 4) — add `daily-arxiv-physics` etc. as the forks materialize | config-only, 5 min per source | when fork repos exist |
+| 7 | **BM25 upgrade for `search_*_text`** (Phase 5) — `rank_bm25` is 0.5 MB extra dep | ~0.5 day | only if real users complain about text-search relevance |
+| 8 | **Operational hardening** — log rotation inside container (uvicorn → docker logs unbounded), disk monitoring on named volumes, backend health endpoint (`GET /healthz`), rolling-update path for backend restart without dropping live SSH-tunneled MCP sessions | ~1 day | when this graduates from personal lab to multi-user service |
+
+Minor cleanup also pending:
+
+* `tmp/` accumulated 50+ scripts during the perf-tuning sessions. Most
+  are one-shot probes; a handful are load-bearing (`gomer_check_logs.sh`,
+  `gomer_setup_source.sh`, `gomer_serve_backend.sh`'s tunnel config).
+  Periodic prune: keep what's referenced from docs or scripts/, delete
+  the rest. .gitignored so cleanup is local.
+* Encoder warm-up only primes the **query** path (`encode_query`).
+  First chunk encode after a cold restart still pays a couple-second
+  bucket-load cost. Minor, but a `_warmup_encoder` extension to also
+  encode one short chunk would close the gap.
+* Two short HTML-parsing edge cases left to sample: the parser handles
+  Pixtral-style `\part` wrappers (fix from 9c798a4) and SmolDocling-style
+  flat sections; we have not stress-tested it on more exotic LaTeXML
+  outputs (review papers with chapters, conference notes, books).
+  Spot-check ~50 random papers when next pulling fresh shards.
+
+Track follow-ups inline here rather than in a separate TODO file —
+this section is the canonical "what's next" so a future session opens
+docs/PLAN.md and sees the punch list.
+
+---
+
 ## Open questions
 
 1. **Refresh policy** — when `arxiv-radar-mcp` runs, should it

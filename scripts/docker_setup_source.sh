@@ -37,7 +37,8 @@ fi
 echo
 echo '  contents:'
 ls /cache/sources/$SOURCE_NAME/data/ | head -5
-echo '  ... ($(ls /cache/sources/$SOURCE_NAME/data/ | wc -l) shards)'
+count=\$(find /cache/sources/$SOURCE_NAME/data -maxdepth 1 -name 'papers-*.json' | wc -l)
+echo \"  ... (\$count shards)\"
 "
 
 echo

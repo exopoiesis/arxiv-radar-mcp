@@ -7,7 +7,7 @@ Resolution order for the config file:
   4. ./radar.toml in CWD (handy during development)
 
 If nothing is found, returns built-in defaults that point at exopoiesis/
-daily-arxiv-ai4chem via raw GitHub URLs.
+arxiv-radar-chemistry via raw GitHub URLs.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class SourceConfig:
     """One domain feed: where to read papers-*.json from."""
     name: str
     type: str  # "github" or "local"
-    repo: str | None = None       # e.g. "exopoiesis/daily-arxiv-ai4chem"
+    repo: str | None = None       # e.g. "exopoiesis/arxiv-radar-chemistry"
     branch: str = "main"
     path: Path | None = None      # for type="local"
 
@@ -115,9 +115,9 @@ class Config:
         return cls(
             sources=[
                 SourceConfig(
-                    name="ai4chem",
+                    name="chemistry",
                     type="github",
-                    repo="exopoiesis/daily-arxiv-ai4chem",
+                    repo="exopoiesis/arxiv-radar-chemistry",
                 ),
             ],
             embeddings=EmbeddingsConfig(),

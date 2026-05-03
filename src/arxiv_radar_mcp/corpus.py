@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -98,7 +99,7 @@ def _load_github(src: SourceConfig, config: Config) -> Iterable[Paper]:
     if src.repo is None:
         raise ValueError(f"source '{src.name}' is type=github but has no repo")
     cache = config.embeddings.cache_dir / "shards" / src.name
-    cache.mkdir(parents=True, exist_ok=True)
+    _prepare_github_cache(cache, repo=src.repo, branch=src.branch)
 
     shard_names = _list_shards_via_api(src.repo, src.branch)
     n = 0
@@ -115,6 +116,30 @@ def _load_github(src: SourceConfig, config: Config) -> Iterable[Paper]:
             yield _record_to_paper(arxiv_id, rec, src.name)
             n += 1
     LOG.info(f"  {src.name} (github:{src.repo}): {n} papers")
+
+
+def _prepare_github_cache(cache: Path, *, repo: str, branch: str) -> None:
+    """Ensure a shard cache belongs to the requested upstream repo/branch.
+
+    The cache path is keyed by source name for backward compatibility
+    (`shards/chemistry`). When the source repo changes but shard filenames
+    stay the same, reusing old files would silently keep serving the old
+    corpus. A tiny marker lets us invalidate that cache on repo/branch
+    migrations.
+    """
+    marker = cache / ".source.json"
+    expected = {"repo": repo, "branch": branch}
+
+    if cache.exists():
+        try:
+            current = json.loads(marker.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            current = None
+        if current != expected:
+            shutil.rmtree(cache)
+
+    cache.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps(expected, indent=1), encoding="utf-8")
 
 
 def _list_shards_via_api(repo: str, branch: str) -> list[str]:

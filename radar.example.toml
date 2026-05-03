@@ -8,11 +8,11 @@
 # Each [sources.<name>] block is one domain feed. The `name` becomes the
 # `domain` filter on every search tool.
 
-[sources.ai4chem]
+[sources.chemistry]
 # type = "github" → fetched from raw.githubusercontent.com on first build,
 # cached on disk under embeddings.cache_dir / shards / <name>/.
 type   = "github"
-repo   = "exopoiesis/daily-arxiv-ai4chem"
+repo   = "exopoiesis/arxiv-radar-chemistry"
 branch = "main"
 
 # [sources.physics]

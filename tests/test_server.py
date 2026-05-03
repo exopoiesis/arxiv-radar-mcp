@@ -84,7 +84,7 @@ class _StubRadar:
         return {"arxiv_id": arxiv_id}
 
     def list_domains(self):
-        return [{"domain": "ai4chem", "papers": 1}]
+        return [{"domain": "chemistry", "papers": 1}]
 
     def list_enriched(self):
         return ["2503.00001", "2504.00002"]
@@ -98,7 +98,7 @@ def test_dispatch_routes_to_method():
 
 def test_dispatch_handles_none_arguments():
     out = _dispatch(_StubRadar(), "list_domains", None)
-    assert out == [{"domain": "ai4chem", "papers": 1}]
+    assert out == [{"domain": "chemistry", "papers": 1}]
 
 
 def test_dispatch_unknown_tool_returns_error():
@@ -165,7 +165,7 @@ def test_radar_server_list_domains(local_config):
     radar = RadarServer(local_config)
     try:
         out = _dispatch(radar, "list_domains", {})
-        assert out == [{"domain": "ai4chem", "papers": 3}]
+        assert out == [{"domain": "chemistry", "papers": 3}]
     finally:
         radar.jobs.shutdown()
 

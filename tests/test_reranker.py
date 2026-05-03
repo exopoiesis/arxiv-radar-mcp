@@ -19,7 +19,7 @@ def _make_paper(arxiv_id: str, title: str) -> Paper:
         arxiv_id=arxiv_id, title=title, first_author="x", authors=["x"],
         abstract=f"abstract for {title}", primary_category="cs.LG",
         categories=[], published="2025-01-01", updated="2025-01-01",
-        pdf_url="", topics=[], tags=[], domain="ai4chem",
+        pdf_url="", topics=[], tags=[], domain="chemistry",
     )
 
 

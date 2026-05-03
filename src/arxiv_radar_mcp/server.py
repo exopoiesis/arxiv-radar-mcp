@@ -369,7 +369,7 @@ def _paper_payload(p: Paper, score: float) -> dict:
 _FILTER_PROPS = {
     "domain": {
         "type": "string",
-        "description": "Filter by source feed name (e.g. 'ai4chem'). Omit to search all.",
+        "description": "Filter by source feed name (e.g. 'chemistry'). Omit to search all.",
     },
     "tag": {
         "type": "string",

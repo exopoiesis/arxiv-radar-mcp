@@ -1,7 +1,7 @@
 # Embedding Model Benchmarks
 
 Long-running record of every bi-encoder we've evaluated against the
-`exopoiesis/daily-arxiv-ai4chem` corpus (and successors). Append rows for
+`exopoiesis/arxiv-radar-chemistry` corpus (and successors). Append rows for
 new models as they ship — never edit historical numbers; they're the only
 honest baseline when re-comparing.
 
@@ -9,7 +9,7 @@ honest baseline when re-comparing.
 
 | Date | Sources | Records | Untagged | Notes |
 |------|---------|---------|----------|-------|
-| 2026-04-27 | ai4chem only | 14 234 | 2 137 (15.0 %) | Pre-multi-domain, pre-literature. Future runs will be on a larger corpus — record separately. |
+| 2026-04-27 | chemistry only | 14 234 | 2 137 (15.0 %) | Pre-multi-domain, pre-literature. Future runs will be on a larger corpus — record separately. |
 
 Future expected scale (per project plan): ~50–70k records once polymers /
 materials / X feeds and the personal literature corpus (~600 PDFs) ship.
@@ -159,7 +159,7 @@ averaged across all 12 generic queries)
 1. **Qwen3-Embedding-4B at native 2560 dim is the strongest model on this
    corpus.** 9/10 recall@1, 10/10 recall@3, only one query out of place
    (Q7 at rank 3, an exoplanet/atmospheric science topic at the edge of
-   ai4chem's domain). It ties OR beats Qwen3-Embedding-8B-native despite
+   chemistry's domain). It ties OR beats Qwen3-Embedding-8B-native despite
    being 2× smaller. **For 14k chemistry/AI corpus, 4B is enough.**
 
 2. **Matryoshka truncation is not free**, especially on the 8B:
@@ -194,7 +194,7 @@ averaged across all 12 generic queries)
 
 #### Recommendation for production (as of 2026-04-27)
 
-**Default for ai4chem corpus today: Qwen3-Embedding-4B at native 2560
+**Default for chemistry corpus today: Qwen3-Embedding-4B at native 2560
 dim, bf16.** ~9 GB VRAM, ~140 MB cache for 14k papers, scales to ~700 MB
 at 70k. Top empirical recall on our tests, no reranker needed for the
 majority of queries.

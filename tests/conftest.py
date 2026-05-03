@@ -47,7 +47,7 @@ def sample_papers_dir(tmp_path: Path) -> Path:
 def local_config(sample_papers_dir: Path, tmp_path: Path) -> Config:
     """Config pointing the loader at the synthetic corpus only (no GitHub fetch)."""
     return Config(
-        sources=[SourceConfig(name="ai4chem", type="local", path=sample_papers_dir)],
+        sources=[SourceConfig(name="chemistry", type="local", path=sample_papers_dir)],
         embeddings=EmbeddingsConfig(cache_dir=tmp_path / "cache"),
         # Reranker disabled by default in tests — avoids accidental CrossEncoder
         # downloads during pytest. Tests that exercise the reranker flip this on.

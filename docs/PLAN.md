@@ -7,7 +7,7 @@ Living design doc. Sibling to `daily-arxiv-*` data forks; this repo is
 
 ## [РЕШЕНИЕ-001] Why an MCP server (not a website / API)
 
-The radar plan from `daily-arxiv-ai4chem` resolved Phase 6 as: a
+The radar plan from `arxiv-radar-chemistry` resolved Phase 6 as: a
 machine-readable interface for AI assistants — Claude Desktop, Claude
 Code, Cursor — over the curated corpus, not yet another HTTP API.
 
@@ -26,7 +26,7 @@ with its source domain so search results can be filtered or attributed.
 
 **Production default:** `Qwen/Qwen3-Embedding-4B` at native 2560 dim,
 bf16, GPU-built. Selected after empirically benchmarking 7 caches against
-the 14k ai4chem corpus on 22 queries (12 generic + 10 paraphrased→target).
+the 14k chemistry corpus on 22 queries (12 generic + 10 paraphrased→target).
 Full results in `docs/MODEL_BENCHMARKS.md`; this is just the headline.
 
 | Model | dim | recall@1 | median | Cache (14k) |
@@ -249,7 +249,7 @@ Why this order, not PDF-first or PDF-included:
   naturally — no preprocessing needed beyond strip/normalize.
 - PDF + MinerU is heavy (~2 GB dep), slow (1-2 min/PDF on CPU), and
   loses content (equations garbled, reading order wrong on multi-col).
-  At 85%+ HTML/LaTeX coverage on our recent ai4chem corpus, the 10-15%
+  At 85%+ HTML/LaTeX coverage on our recent chemistry corpus, the 10-15%
   shortfall is a worse trade than the dependency weight.
 - Empirical reference: arxiv URL-extraction benchmarks show LaTeX+HTML
   combined F1=0.69 vs HTML-only 0.65 vs text-from-PDF much lower
@@ -290,7 +290,7 @@ self.abstract_index = EmbeddingIndex(...)         # always present
 self.fulltext_index = EmbeddingIndex(...) | None  # None until first reindex
 ```
 
-**MCP tool surface (14 total):**
+**MCP tool surface (15 total):**
 
 ```
 # Abstracts (6)                        — operate on abstract index
@@ -306,9 +306,10 @@ search_paper_text(q, k)                # returns [{arxiv_id, section, snippet, s
 search_paper_semantic(q, k)
 similar_to_paper(arxiv_id, k)          # mean-of-chunks per paper
 
-# Admin (5)
+# Admin (6)
 fetch_papers([arxiv_ids])              → {job_id}    # bg: download+parse+chunk+save
 reindex()                              → {job_id}    # bg: full re-encode of all sources
+refresh_abstracts(force_full=false)    → {job_id}    # bg: pull shards + refresh abstracts
 job_status(job_id)                     → {state, progress, result?, error?}
 job_list()                             → [{job_id, kind, state, ...}]
 list_enriched()                        → [arxiv_id, ...]
@@ -466,19 +467,25 @@ Priority order (top first):
 | # | Item | Size | Trigger / when |
 |---|------|------|----------------|
 | 1 | **Stress test reindex on 50-100 fetched papers** — extrapolation said ~30 min, want to confirm no OOM, no torn-write, no encoder lock starvation; capture real bucket distribution on a real corpus | 30 min run + diagnose | before Phase 3 dogfood — sets user expectations |
-| 2 | **Quickstart for CPU users in README** — 5-min flow from `pip install -e .` to first query against mxbai-large abstracts (no GPU). Includes Claude Desktop config snippet for the local mode | ~1 hour | before Phase 3 — most non-Игнат users will start here |
-| 3 | **Troubleshooting section in README** — common failures: SSH tunnel won't open, backend hangs on first model download, named volume disk full, `git pull` fails inside container, MCP client times out on long reindex | ~1 hour | as user pain reports come in; seed it now with what we already hit (race condition, dtype mismatch, max_seq_length default) |
-| 4 | **GitHub Actions CI** — pytest matrix on push/PR, py 3.11 + 3.12 | ~30 LOC YAML | before public traffic |
-| 5 | **PyPI release** (Phase 6) | ~1 day — version policy, license review, README rendering | after dogfood feedback |
-| 6 | **Multi-source feeds** (Phase 4) — add `daily-arxiv-physics` etc. as the forks materialize | config-only, 5 min per source | when fork repos exist |
-| 7 | **BM25 upgrade for `search_*_text`** (Phase 5) — `rank_bm25` is 0.5 MB extra dep | ~0.5 day | only if real users complain about text-search relevance |
-| 8 | **Operational hardening** — log rotation inside container (uvicorn → docker logs unbounded), disk monitoring on named volumes, backend health endpoint (`GET /healthz`), rolling-update path for backend restart without dropping live SSH-tunneled MCP sessions | ~1 day | when this graduates from personal lab to multi-user service |
+| 2 | **GitHub Actions CI** — pytest matrix on push/PR, py 3.11 + 3.12 | ~30 LOC YAML | before public traffic |
+| 3 | **PyPI release** (Phase 6) | ~1 day — version policy, license review, README rendering | after dogfood feedback |
+| 4 | **Multi-source feeds** (Phase 4) — add `daily-arxiv-physics` etc. as the forks materialize | config-only, 5 min per source | when fork repos exist |
+| 5 | **BM25 upgrade for `search_*_text`** (Phase 5) — `rank_bm25` is 0.5 MB extra dep | ~0.5 day | only if real users complain about text-search relevance |
+| 6 | **Operational hardening** — log rotation inside container (uvicorn → docker logs unbounded), disk monitoring on named volumes, backend health endpoint (`GET /healthz`), rolling-update path for backend restart without dropping live SSH-tunneled MCP sessions | ~1 day | when this graduates from personal lab to multi-user service |
+
+Completed since this pickup:
+
+* 2026-05-03 — README now has a 5-minute CPU quickstart, local Claude
+  Desktop config examples, a troubleshooting section, and the tool count
+  synchronized to the 15-tool `TOOL_SPECS` surface (`refresh_abstracts`
+  included).
 
 Minor cleanup also pending:
 
 * `tmp/` accumulated 50+ scripts during the perf-tuning sessions. Most
-  are one-shot probes; a handful are load-bearing (`gomer_check_logs.sh`,
-  `gomer_setup_source.sh`, `gomer_serve_backend.sh`'s tunnel config).
+  are one-shot probes; the load-bearing Docker setup scripts have been
+  promoted to `scripts/` (`docker_init_volume.sh`,
+  `docker_setup_source.sh`).
   Periodic prune: keep what's referenced from docs or scripts/, delete
   the rest. .gitignored so cleanup is local.
 * Encoder warm-up only primes the **query** path (`encode_query`).
@@ -523,7 +530,7 @@ docs/PLAN.md and sees the punch list.
 |---|------|--------|
 | 0 | Project scaffold (this doc, packaging, config, corpus loader, search skeletons, tests) | done |
 | 1 | Wire MCP SDK in `server.serve()` — register tools, stdio loop | done (2026-04-27) |
-| 2 | Build cache end-to-end on the real ai4chem corpus, verify search quality | done (2026-04-27) — 7 caches built on gomer; Qwen3-4B-native chosen ([РЕШЕНИЕ-003]); benchmarks in `docs/MODEL_BENCHMARKS.md` |
+| 2 | Build cache end-to-end on the real chemistry corpus, verify search quality | done (2026-04-27) — 7 caches built on gomer; Qwen3-4B-native chosen ([РЕШЕНИЕ-003]); benchmarks in `docs/MODEL_BENCHMARKS.md` |
 | 7 | Tool rename + remove hybrid + paper_info (was get_paper) — public API freeze for fulltext expansion | done (2026-05-01) |
 | 8 | Fulltext fetcher (HTML+LaTeX cascade, [РЕШЕНИЕ-013]), chunker by headings ([РЕШЕНИЕ-014]) | done (2026-05-01) |
 | 9 | Async jobs registry ([РЕШЕНИЕ-015]) + new MCP tools (search_paper_*, fetch_papers, reindex, job_status, job_list) | done (2026-05-01) |

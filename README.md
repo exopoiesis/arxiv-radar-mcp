@@ -2,10 +2,9 @@
 
 MCP server providing semantic + text search over arXiv abstracts and
 **on-demand full text** (HTML / LaTeX source) of papers. Reads abstracts
-from the [`daily-arxiv-*`](https://github.com/exopoiesis?tab=repositories&q=daily-arxiv)
-fork family (`chemistry`, `physics`, `polymers`, …); fetches and indexes
-full text per-paper at the user's request via `arxiv.org/html` and
-`arxiv.org/e-print`.
+from the [`arxiv-radar-*`](https://github.com/exopoiesis?tab=repositories&q=arxiv-radar)
+source family, grouped by science area; fetches and indexes full text
+per-paper at the user's request via `arxiv.org/html` and `arxiv.org/e-print`.
 
 > **Status:** Phase 7-13 done (2026-05-02). 15 MCP tools, two parallel
 > indexes (abstracts + fulltext), unit tests green, end-to-end
@@ -19,16 +18,16 @@ full text per-paper at the user's request via `arxiv.org/html` and
 
 Two-step user flow:
 
-1. **Scan abstracts** — Claude searches the daily-arxiv corpus
-   (~14k papers in `chemistry`, growing) via `search_abstract_*` and
-   reports candidates.
+1. **Scan abstracts** — Claude searches the multi-domain arxiv-radar
+   corpus via `search_abstract_*` and reports candidates. Use `domain`
+   to restrict search to a science area.
 2. **Drill into full text** — when the user wants depth, Claude calls
    `fetch_papers([ids])` (background job, downloads + parses), then
    `reindex` (rebuilds the fulltext embedding index), then queries it
    with `search_paper_*` to surface specific sections ("found in
    Methods of paper X").
 
-Each `daily-arxiv-<domain>` repo publishes:
+Each `arxiv-radar-<domain>` repo publishes:
 - `data/papers-YYYY-MM.json` — monthly abstract shards with titles,
   authors, abstracts, tags, topics
 - `tags/canonical.yaml` — curated tag vocabulary
@@ -36,6 +35,20 @@ Each `daily-arxiv-<domain>` repo publishes:
 This server reads those shards (over GitHub raw URLs, on-disk shard
 cache), keeps abstracts in memory, and adds a separate fulltext layer
 fetched on demand. Full texts are cached locally per arxiv_id.
+
+Default science-area feeds:
+
+| Domain filter | Source repo |
+|---|---|
+| `chemistry` | `exopoiesis/arxiv-radar-chemistry` |
+| `chemical_engineering` | `exopoiesis/arxiv-radar-chem-eng` |
+| `physics` | `exopoiesis/arxiv-radar-physics` |
+| `polymer` | `exopoiesis/arxiv-radar-polymer` |
+
+Current local corpus scale after dedup is about 33k unique arXiv papers:
+`chemistry` 14.3k, `physics` 17.7k, `polymer` 3.0k, and
+`chemical_engineering` 1.1k. A paper can belong to more than one domain;
+in that case its `domain` field is a comma-separated list.
 
 ## Tool surface (15 tools)
 
@@ -53,6 +66,18 @@ fetched on demand. Full texts are cached locally per arxiv_id.
 `tag` and `domain` are pre-search corpus filters — they restrict the
 ranked subset, not the embedding signal. Tags are not encoded into
 embeddings (would dilute semantic signal).
+
+Common domain-filtered calls:
+
+```json
+{"query": "graph neural network potentials for phase transitions", "domain": "physics", "k": 10}
+{"query": "polymer electrolyte ion transport", "domain": "polymer", "k": 10}
+{"query": "surrogate models for distillation columns", "domain": "chemical_engineering", "k": 10}
+```
+
+Call `list_domains()` to see the active source feeds and paper counts in
+the running server. Call `list_tags({"domain": "physics"})` or the same
+tool with another domain to inspect that area's canonical vocabulary.
 
 ### Fulltext (3)
 
@@ -78,6 +103,18 @@ Operates on chunks of full texts the user has explicitly enriched.
 Admin operations are async because refresh/reindex on a meaningful
 corpus is slow enough to break the MCP conversation if blocking. Jobs
 persist to disk and survive restarts.
+
+There are two refresh modes for abstract sources:
+
+- `type = "github"` reads `data/papers-*.json` from GitHub raw URLs and
+  caches shards under `<cache_dir>/shards/<domain>`.
+- `type = "local"` reads a sparse clone or local checkout. If that path
+  is a git repo, `refresh_abstracts` runs `git pull --ff-only` before
+  reloading the corpus.
+
+For long-running GPU backends, `scripts/docker_setup_source.sh` creates
+local sparse clones for all default science areas and rewrites
+`/cache/radar.toml` to use `type = "local"`.
 
 ## Full-text fetch cascade
 
@@ -113,7 +150,7 @@ reindex time on real papers.
 ## Architecture
 
 ```
-                       daily-arxiv-* GitHub raw URLs
+                       arxiv-radar-* GitHub raw URLs
                                     │
                                     ▼
                           corpus.load_all()
@@ -200,6 +237,21 @@ type = "github"
 repo = "exopoiesis/arxiv-radar-chemistry"
 branch = "main"
 
+[sources.chemical_engineering]
+type = "github"
+repo = "exopoiesis/arxiv-radar-chem-eng"
+branch = "main"
+
+[sources.physics]
+type = "github"
+repo = "exopoiesis/arxiv-radar-physics"
+branch = "main"
+
+[sources.polymer]
+type = "github"
+repo = "exopoiesis/arxiv-radar-polymer"
+branch = "main"
+
 [embeddings]
 model = "mixedbread-ai/mxbai-embed-large-v1"
 batch_size = 64
@@ -266,7 +318,7 @@ arxiv-radar-mcp                              # stdio MCP server
 ```
 
 What runs on CPU comfortably:
-- abstract `search_abstract_*` over 14k papers — sub-second
+- abstract `search_abstract_*` over tens of thousands of papers — sub-second
 - `fetch_papers` (HTTP/LaTeX, no model) — seconds per paper
 - `reindex` over a few enriched papers with mxbai — minutes
 - Heavy Qwen3-4B reindex on CPU — **infeasible** (~100 hours / 100 papers).
@@ -301,7 +353,7 @@ bash scripts/docker_build.sh
 # write radar.toml into the named volume
 bash scripts/docker_init_volume.sh
 
-# optional: sparse-clone the chemistry source into the cache volume
+# optional: sparse-clone all default science-area sources into the cache volume
 bash scripts/docker_setup_source.sh
 
 # start the long-running backend (--restart unless-stopped)
@@ -474,9 +526,20 @@ type = "github"
 repo = "exopoiesis/arxiv-radar-chemistry"
 branch = "main"
 
+[sources.chemical_engineering]
+type = "github"
+repo = "exopoiesis/arxiv-radar-chem-eng"
+branch = "main"
+
 [sources.physics]
-type = "local"
-path = "/path/to/daily-arxiv-physics"
+type = "github"
+repo = "exopoiesis/arxiv-radar-physics"
+branch = "main"
+
+[sources.polymer]
+type = "github"
+repo = "exopoiesis/arxiv-radar-polymer"
+branch = "main"
 
 [embeddings]
 model     = "Qwen/Qwen3-Embedding-4B"   # or "mixedbread-ai/mxbai-embed-large-v1" for CPU

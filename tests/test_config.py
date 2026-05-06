@@ -72,9 +72,12 @@ def test_falls_back_to_defaults_when_nothing_resolves(isolate_config_env):
     """No explicit, no env, no default file, no cwd radar.toml → built-ins."""
     cfg = load(None)
 
-    assert cfg.sources[0].name == "chemistry"
-    assert cfg.sources[0].type == "github"
-    assert cfg.sources[0].repo == "exopoiesis/arxiv-radar-chemistry"
+    assert [(s.name, s.type, s.repo) for s in cfg.sources] == [
+        ("chemistry", "github", "exopoiesis/arxiv-radar-chemistry"),
+        ("chemical_engineering", "github", "exopoiesis/arxiv-radar-chem-eng"),
+        ("physics", "github", "exopoiesis/arxiv-radar-physics"),
+        ("polymer", "github", "exopoiesis/arxiv-radar-polymer"),
+    ]
     # Default model is mxbai-embed-large-v1 (РЕШЕНИЕ-003).
     assert cfg.embeddings.model == "mixedbread-ai/mxbai-embed-large-v1"
     assert cfg.reranker.enabled is True

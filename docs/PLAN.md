@@ -1,6 +1,6 @@
 # Plan & decisions — arxiv-radar-mcp
 
-Living design doc. Sibling to `daily-arxiv-*` data forks; this repo is
+Living design doc. Sibling to `arxiv-radar-*` data forks; this repo is
 **code only**, the data is read from the fork family.
 
 ---
@@ -17,8 +17,8 @@ researcher already uses.
 
 ## [РЕШЕНИЕ-002] One repo, many domains
 
-Sources are listed in `radar.toml`. Adding `daily-arxiv-physics` is
-config-only — no code change. The loader concatenates per-domain
+Sources are listed in `radar.toml`. Adding another `arxiv-radar-*`
+source is config-only — no code change. The loader concatenates per-domain
 records into one in-memory map keyed by arxiv_id and tags each Paper
 with its source domain so search results can be filtered or attributed.
 
@@ -208,7 +208,7 @@ What needs work as we grow:
 ## [РЕШЕНИЕ-012] Self-contained repo, arXiv-only scope
 
 This repo handles **arXiv content end-to-end**: abstracts (via the
-`daily-arxiv-*` fork family) and on-demand full text (via
+`arxiv-radar-*` fork family) and on-demand full text (via
 `arxiv.org/html` and `arxiv.org/e-print`). One server, one tool
 catalog, one Docker image. No dependency on, or cross-reference to,
 sibling repos in the workspace.
@@ -386,7 +386,7 @@ GPU work piles up, swap for an external worker (Celery/RQ) — but YAGNI.
 
 ## [РЕШЕНИЕ-016] Daily refresh — git pull + diff + atomic update
 
-The `daily-arxiv-*` repos publish a fresh `papers-YYYY-MM.json` shard
+The `arxiv-radar-*` repos publish a fresh `papers-YYYY-MM.json` shard
 each morning (GitHub Actions cron 0 0 * * *). Without an in-server
 refresh loop, the abstract corpus drifts more stale every day. Manual
 `--build-cache` puts that work on the user.
@@ -441,7 +441,7 @@ Rejected designs:
 
 Bash helper scripts (venv setup, smoke runs, ad-hoc one-shots) live in
 `./tmp/` *inside this repo* — not in the parent project's shared `tmp/`.
-The repo is a self-contained sibling to `daily-arxiv-*`, and stays
+The repo is a self-contained sibling to `arxiv-radar-*`, and stays
 isolated: no scripts, paths, or state escape upward. Single exception:
 the cross-project radar plan at `knowledge/arxiv_radar_plan.md` in the
 parent — that's the rolling log across all the radar repos and is the
@@ -469,7 +469,7 @@ Priority order (top first):
 | 1 | **Stress test reindex on 50-100 fetched papers** — extrapolation said ~30 min, want to confirm no OOM, no torn-write, no encoder lock starvation; capture real bucket distribution on a real corpus | 30 min run + diagnose | before Phase 3 dogfood — sets user expectations |
 | 2 | **GitHub Actions CI** — pytest matrix on push/PR, py 3.11 + 3.12 | ~30 LOC YAML | before public traffic |
 | 3 | **PyPI release** (Phase 6) | ~1 day — version policy, license review, README rendering | after dogfood feedback |
-| 4 | **Multi-source feeds** (Phase 4) — add `daily-arxiv-physics` etc. as the forks materialize | config-only, 5 min per source | when fork repos exist |
+| 4 | **Additional source feeds** — add new science areas as the forks materialize | config-only, 5 min per source | when fork repos exist |
 | 5 | **BM25 upgrade for `search_*_text`** (Phase 5) — `rank_bm25` is 0.5 MB extra dep | ~0.5 day | only if real users complain about text-search relevance |
 | 6 | **Operational hardening** — log rotation inside container (uvicorn → docker logs unbounded), disk monitoring on named volumes, backend health endpoint (`GET /healthz`), rolling-update path for backend restart without dropping live SSH-tunneled MCP sessions | ~1 day | when this graduates from personal lab to multi-user service |
 
@@ -479,6 +479,9 @@ Completed since this pickup:
   Desktop config examples, a troubleshooting section, and the tool count
   synchronized to the 15-tool `TOOL_SPECS` surface (`refresh_abstracts`
   included).
+* 2026-05-06 — Default source set expanded from chemistry-only to four
+  science areas: `chemistry`, `chemical_engineering`, `physics`,
+  `polymer`.
 
 Minor cleanup also pending:
 
@@ -539,7 +542,7 @@ docs/PLAN.md and sees the punch list.
 | 12 | Daily auto-refresh of abstract corpus ([РЕШЕНИЕ-016]) — `refresh.py`, scheduler loop, MCP tool refresh_abstracts | done (2026-05-01) |
 | 13 | Production polish from W1 e2e: junk-section filter, chunker max_tokens 12 288→4 096 + paragraph overlap, encoder warm-up, bf16 cast, thread-lock | done (2026-05-02) — reindex 954 s → 287 s on 16 papers; junk hits 7/15 → 0/15. See `docs/MODEL_BENCHMARKS.md` |
 | 3 | First user: connect to Claude Desktop, dogfood for a week | pending — gated on 7-13 |
-| 4 | Add `physics` / `polymers` domain feeds as they appear | pending |
+| 4 | Add `chemical_engineering` / `physics` / `polymer` domain feeds | done (2026-05-06) |
 | 5 | BM25 upgrade if text relevance complaints surface | pending |
 | 6 | PyPI release | pending |
 | — | Non-arXiv content (PDFs without arxiv_id, video, books) | out of scope — this server handles arxiv only ([РЕШЕНИЕ-012]) |

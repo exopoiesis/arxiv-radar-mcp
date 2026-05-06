@@ -6,8 +6,8 @@ Resolution order for the config file:
   3. ~/.config/arxiv-radar/radar.toml  (or platformdirs equivalent on Windows / macOS)
   4. ./radar.toml in CWD (handy during development)
 
-If nothing is found, returns built-in defaults that point at exopoiesis/
-arxiv-radar-chemistry via raw GitHub URLs.
+If nothing is found, returns built-in defaults that point at the
+exopoiesis/arxiv-radar-* source repos via raw GitHub URLs.
 """
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ class ServerConfig:
 
 @dataclass
 class RefreshConfig:
-    """Daily auto-refresh of the abstract corpus from the daily-arxiv-* feeds.
+    """Daily auto-refresh of the abstract corpus from the arxiv-radar-* feeds.
 
     `enabled=True` (default): backend kicks off a background asyncio task
     that runs `refresh_sources()` every `interval_hours`. For sources whose
@@ -90,7 +90,7 @@ class RefreshConfig:
 
     `full_rebuild=True` (recommended for GPU server): re-encode the entire
     abstract index after every refresh. Robust to deletions in upstream.
-    Costs ~7 min on RTX 4070 for 14k papers — fine to do nightly.
+    Costs scale with corpus size and embedding model; fine to do nightly on GPU.
 
     `full_rebuild=False` (recommended for CPU laptop): incremental — encode
     only new arxiv_ids, append to embeddings.npy. Cheap (~10 sec/50 papers
@@ -118,6 +118,21 @@ class Config:
                     name="chemistry",
                     type="github",
                     repo="exopoiesis/arxiv-radar-chemistry",
+                ),
+                SourceConfig(
+                    name="chemical_engineering",
+                    type="github",
+                    repo="exopoiesis/arxiv-radar-chem-eng",
+                ),
+                SourceConfig(
+                    name="physics",
+                    type="github",
+                    repo="exopoiesis/arxiv-radar-physics",
+                ),
+                SourceConfig(
+                    name="polymer",
+                    type="github",
+                    repo="exopoiesis/arxiv-radar-polymer",
                 ),
             ],
             embeddings=EmbeddingsConfig(),

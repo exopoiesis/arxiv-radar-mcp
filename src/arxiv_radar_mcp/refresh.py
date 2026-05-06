@@ -1,4 +1,4 @@
-"""Daily refresh of the abstract corpus from the daily-arxiv-* feeds.
+"""Daily refresh of the abstract corpus from the arxiv-radar-* feeds.
 
 The flow:
   1. For each `source` whose `path` is a git working tree, run

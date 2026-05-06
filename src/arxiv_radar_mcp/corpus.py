@@ -1,4 +1,4 @@
-"""Corpus loader: ingests papers-*.json shards from one or more daily-arxiv-* sources.
+"""Corpus loader: ingests papers-*.json shards from one or more arxiv-radar-* sources.
 
 A `Paper` keeps the upstream schema verbatim plus a `domain` field marking
 which source feed it came from (so search results can be filtered or

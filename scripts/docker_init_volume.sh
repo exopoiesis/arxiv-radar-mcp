@@ -19,6 +19,21 @@ type   = "github"
 repo   = "exopoiesis/arxiv-radar-chemistry"
 branch = "main"
 
+[sources.chemical_engineering]
+type   = "github"
+repo   = "exopoiesis/arxiv-radar-chem-eng"
+branch = "main"
+
+[sources.physics]
+type   = "github"
+repo   = "exopoiesis/arxiv-radar-physics"
+branch = "main"
+
+[sources.polymer]
+type   = "github"
+repo   = "exopoiesis/arxiv-radar-polymer"
+branch = "main"
+
 [embeddings]
 model      = "Qwen/Qwen3-Embedding-4B"
 cache_dir  = "/cache/abstracts"

@@ -215,7 +215,7 @@ class RadarServer:
     def refresh_abstracts(self, force_full: bool = False) -> dict:
         """Submit a background refresh job. Returns {job_id} immediately.
 
-        Pulls the daily-arxiv-* feeds (git pull where applicable),
+        Pulls the arxiv-radar-* feeds (git pull where applicable),
         diffs against the in-memory corpus, encodes new abstracts, and
         atomically swaps the abstract index. By default uses the strategy
         from radar.toml ([refresh] full_rebuild = ...). Pass force_full=true
@@ -560,7 +560,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "refresh_abstracts",
         "description": (
-            "Pull the latest abstracts from the daily-arxiv-* feeds and "
+            "Pull the latest abstracts from the arxiv-radar-* feeds and "
             "update the abstract embedding index. Runs in the background "
             "and returns {job_id} immediately; poll with job_status. "
             "Strategy is incremental by default (encode only new arxiv_ids); "

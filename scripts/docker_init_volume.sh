@@ -24,6 +24,11 @@ type   = "github"
 repo   = "exopoiesis/arxiv-radar-chem-eng"
 branch = "main"
 
+[sources.electrochemistry]
+type   = "github"
+repo   = "exopoiesis/arxiv-radar-electrochemistry"
+branch = "main"
+
 [sources.physics]
 type   = "github"
 repo   = "exopoiesis/arxiv-radar-physics"
@@ -32,6 +37,11 @@ branch = "main"
 [sources.polymer]
 type   = "github"
 repo   = "exopoiesis/arxiv-radar-polymer"
+branch = "main"
+
+[sources.sulfide_materials]
+type   = "github"
+repo   = "exopoiesis/arxiv-radar-sulfide-materials"
 branch = "main"
 
 [embeddings]

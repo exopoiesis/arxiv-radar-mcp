@@ -4,7 +4,8 @@
 # Only data/ and tags/ are materialized. After cloning, /cache/radar.toml is
 # switched to type=local so daily refresh can use git pull instead of GitHub
 # raw downloads. With no repo/name arguments this installs the default
-# science-area feeds: chemistry, chemical_engineering, physics, polymer.
+# science-area feeds: chemistry, chemical_engineering, electrochemistry,
+# physics, polymer, sulfide_materials.
 set -e
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL='*'
@@ -20,10 +21,12 @@ else
     SOURCE_REPOS=(
         "https://github.com/exopoiesis/arxiv-radar-chemistry"
         "https://github.com/exopoiesis/arxiv-radar-chem-eng"
+        "https://github.com/exopoiesis/arxiv-radar-electrochemistry"
         "https://github.com/exopoiesis/arxiv-radar-physics"
         "https://github.com/exopoiesis/arxiv-radar-polymer"
+        "https://github.com/exopoiesis/arxiv-radar-sulfide-materials"
     )
-    SOURCE_NAMES=("chemistry" "chemical_engineering" "physics" "polymer")
+    SOURCE_NAMES=("chemistry" "chemical_engineering" "electrochemistry" "physics" "polymer" "sulfide_materials")
 fi
 
 for i in "${!SOURCE_REPOS[@]}"; do
@@ -99,6 +102,10 @@ path = \"/cache/sources/chemistry\"
 type = \"local\"
 path = \"/cache/sources/chemical_engineering\"
 
+[sources.electrochemistry]
+type = \"local\"
+path = \"/cache/sources/electrochemistry\"
+
 [sources.physics]
 type = \"local\"
 path = \"/cache/sources/physics\"
@@ -106,6 +113,10 @@ path = \"/cache/sources/physics\"
 [sources.polymer]
 type = \"local\"
 path = \"/cache/sources/polymer\"
+
+[sources.sulfide_materials]
+type = \"local\"
+path = \"/cache/sources/sulfide_materials\"
 
 [embeddings]
 model      = \"Qwen/Qwen3-Embedding-4B\"

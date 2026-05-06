@@ -125,6 +125,11 @@ class Config:
                     repo="exopoiesis/arxiv-radar-chem-eng",
                 ),
                 SourceConfig(
+                    name="electrochemistry",
+                    type="github",
+                    repo="exopoiesis/arxiv-radar-electrochemistry",
+                ),
+                SourceConfig(
                     name="physics",
                     type="github",
                     repo="exopoiesis/arxiv-radar-physics",
@@ -133,6 +138,11 @@ class Config:
                     name="polymer",
                     type="github",
                     repo="exopoiesis/arxiv-radar-polymer",
+                ),
+                SourceConfig(
+                    name="sulfide_materials",
+                    type="github",
+                    repo="exopoiesis/arxiv-radar-sulfide-materials",
                 ),
             ],
             embeddings=EmbeddingsConfig(),

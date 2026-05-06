@@ -479,9 +479,9 @@ Completed since this pickup:
   Desktop config examples, a troubleshooting section, and the tool count
   synchronized to the 15-tool `TOOL_SPECS` surface (`refresh_abstracts`
   included).
-* 2026-05-06 — Default source set expanded from chemistry-only to four
-  science areas: `chemistry`, `chemical_engineering`, `physics`,
-  `polymer`.
+* 2026-05-06 — Default source set expanded from chemistry-only to six
+  science areas: `chemistry`, `chemical_engineering`,
+  `electrochemistry`, `physics`, `polymer`, `sulfide_materials`.
 
 Minor cleanup also pending:
 
@@ -542,7 +542,7 @@ docs/PLAN.md and sees the punch list.
 | 12 | Daily auto-refresh of abstract corpus ([РЕШЕНИЕ-016]) — `refresh.py`, scheduler loop, MCP tool refresh_abstracts | done (2026-05-01) |
 | 13 | Production polish from W1 e2e: junk-section filter, chunker max_tokens 12 288→4 096 + paragraph overlap, encoder warm-up, bf16 cast, thread-lock | done (2026-05-02) — reindex 954 s → 287 s on 16 papers; junk hits 7/15 → 0/15. See `docs/MODEL_BENCHMARKS.md` |
 | 3 | First user: connect to Claude Desktop, dogfood for a week | pending — gated on 7-13 |
-| 4 | Add `chemical_engineering` / `physics` / `polymer` domain feeds | done (2026-05-06) |
+| 4 | Add `chemical_engineering` / `electrochemistry` / `physics` / `polymer` / `sulfide_materials` domain feeds | done (2026-05-06) |
 | 5 | BM25 upgrade if text relevance complaints surface | pending |
 | 6 | PyPI release | pending |
 | — | Non-arXiv content (PDFs without arxiv_id, video, books) | out of scope — this server handles arxiv only ([РЕШЕНИЕ-012]) |

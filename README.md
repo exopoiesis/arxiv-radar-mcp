@@ -42,13 +42,16 @@ Default science-area feeds:
 |---|---|
 | `chemistry` | `exopoiesis/arxiv-radar-chemistry` |
 | `chemical_engineering` | `exopoiesis/arxiv-radar-chem-eng` |
+| `electrochemistry` | `exopoiesis/arxiv-radar-electrochemistry` |
 | `physics` | `exopoiesis/arxiv-radar-physics` |
 | `polymer` | `exopoiesis/arxiv-radar-polymer` |
+| `sulfide_materials` | `exopoiesis/arxiv-radar-sulfide-materials` |
 
-Current local corpus scale after dedup is about 33k unique arXiv papers:
-`chemistry` 14.3k, `physics` 17.7k, `polymer` 3.0k, and
-`chemical_engineering` 1.1k. A paper can belong to more than one domain;
-in that case its `domain` field is a comma-separated list.
+Current source shards contain about 36.6k domain assignments before
+cross-domain dedup: `chemistry` 14.4k, `physics` 17.7k, `polymer`
+3.2k, `chemical_engineering` 1.1k, `electrochemistry` 108, and
+`sulfide_materials` 99. A paper can belong to more than one domain; in
+that case its `domain` field is a comma-separated list.
 
 ## Tool surface (15 tools)
 
@@ -73,6 +76,8 @@ Common domain-filtered calls:
 {"query": "graph neural network potentials for phase transitions", "domain": "physics", "k": 10}
 {"query": "polymer electrolyte ion transport", "domain": "polymer", "k": 10}
 {"query": "surrogate models for distillation columns", "domain": "chemical_engineering", "k": 10}
+{"query": "solid electrolyte interphase impedance lithium metal", "domain": "electrochemistry", "k": 10}
+{"query": "argyrodite sulfide solid electrolyte grain boundary", "domain": "sulfide_materials", "k": 10}
 ```
 
 Call `list_domains()` to see the active source feeds and paper counts in
@@ -242,6 +247,11 @@ type = "github"
 repo = "exopoiesis/arxiv-radar-chem-eng"
 branch = "main"
 
+[sources.electrochemistry]
+type = "github"
+repo = "exopoiesis/arxiv-radar-electrochemistry"
+branch = "main"
+
 [sources.physics]
 type = "github"
 repo = "exopoiesis/arxiv-radar-physics"
@@ -250,6 +260,11 @@ branch = "main"
 [sources.polymer]
 type = "github"
 repo = "exopoiesis/arxiv-radar-polymer"
+branch = "main"
+
+[sources.sulfide_materials]
+type = "github"
+repo = "exopoiesis/arxiv-radar-sulfide-materials"
 branch = "main"
 
 [embeddings]
@@ -531,6 +546,11 @@ type = "github"
 repo = "exopoiesis/arxiv-radar-chem-eng"
 branch = "main"
 
+[sources.electrochemistry]
+type = "github"
+repo = "exopoiesis/arxiv-radar-electrochemistry"
+branch = "main"
+
 [sources.physics]
 type = "github"
 repo = "exopoiesis/arxiv-radar-physics"
@@ -539,6 +559,11 @@ branch = "main"
 [sources.polymer]
 type = "github"
 repo = "exopoiesis/arxiv-radar-polymer"
+branch = "main"
+
+[sources.sulfide_materials]
+type = "github"
+repo = "exopoiesis/arxiv-radar-sulfide-materials"
 branch = "main"
 
 [embeddings]

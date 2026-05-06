@@ -75,8 +75,10 @@ def test_falls_back_to_defaults_when_nothing_resolves(isolate_config_env):
     assert [(s.name, s.type, s.repo) for s in cfg.sources] == [
         ("chemistry", "github", "exopoiesis/arxiv-radar-chemistry"),
         ("chemical_engineering", "github", "exopoiesis/arxiv-radar-chem-eng"),
+        ("electrochemistry", "github", "exopoiesis/arxiv-radar-electrochemistry"),
         ("physics", "github", "exopoiesis/arxiv-radar-physics"),
         ("polymer", "github", "exopoiesis/arxiv-radar-polymer"),
+        ("sulfide_materials", "github", "exopoiesis/arxiv-radar-sulfide-materials"),
     ]
     # Default model is mxbai-embed-large-v1 (РЕШЕНИЕ-003).
     assert cfg.embeddings.model == "mixedbread-ai/mxbai-embed-large-v1"

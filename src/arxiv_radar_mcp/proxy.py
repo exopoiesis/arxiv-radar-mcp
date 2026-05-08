@@ -110,31 +110,107 @@ def _wait_for_port(port: int, timeout: float) -> bool:
     return False
 
 
-async def _run_bridge(url: str) -> None:
+async def _run_bridge(url: str, *,
+                      max_consecutive_failures: int = 10,
+                      max_backoff_s: float = 30.0) -> None:
     """Connect MCP streamable-HTTP client to `url` and pipe stdio↔remote.
+
+    Reconnects automatically when the backend session ends (e.g. backend
+    container restarted, SSH tunnel dropped, server-initiated close). The
+    local stdio is opened once for the lifetime of the proxy so Claude
+    Code's view of the proxy process never changes — events and tool
+    calls flow over freshly-initialized backend sessions transparently.
+
+    `max_consecutive_failures` caps the number of *back-to-back* failed
+    connection attempts before we give up and let Claude Code's MCP
+    supervisor respawn us. The counter resets every time a backend session
+    successfully establishes (i.e. at least one initialize handshake
+    completed). After exhaustion we return so the parent process can exit
+    non-zero.
 
     Imported lazily so unit tests don't need the SDK loaded.
     """
     from mcp.client.streamable_http import streamablehttp_client
     from mcp.server.stdio import stdio_server
 
-    async with streamablehttp_client(url) as (remote_read, remote_write, _):
-        async with stdio_server() as (local_read, local_write):
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(_pipe, local_read, remote_write)   # client → server
-                tg.start_soon(_pipe, remote_read, local_write)   # server → client
+    async with stdio_server() as (local_read, local_write):
+        await _bridge_loop(
+            connect=lambda: streamablehttp_client(url),
+            local_read=local_read,
+            local_write=local_write,
+            max_consecutive_failures=max_consecutive_failures,
+            max_backoff_s=max_backoff_s,
+        )
+
+
+async def _bridge_loop(*, connect, local_read, local_write,
+                       max_consecutive_failures: int = 10,
+                       max_backoff_s: float = 30.0,
+                       sleep=None) -> None:
+    """Drive one stdio↔remote session at a time; reconnect on disconnect.
+
+    `connect` is a zero-argument callable that returns an async context
+    manager yielding `(remote_read, remote_write, _aux)` — same shape as
+    the MCP SDK's `streamablehttp_client(url)`. The decoupling exists so
+    the reconnect loop can be unit-tested with fake streams without
+    spinning up an HTTP server.
+
+    `sleep` is an injection point for tests; defaults to `anyio.sleep`.
+    """
+    if sleep is None:
+        sleep = anyio.sleep
+
+    consecutive_failures = 0
+    backoff = 1.0
+
+    while True:
+        session_succeeded = False
+        try:
+            async with connect() as triple:
+                remote_read, remote_write = triple[0], triple[1]
+                session_succeeded = True
+                LOG.info("backend session up; bridging stdio↔HTTP")
+                consecutive_failures = 0
+                backoff = 1.0
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(_pipe, local_read, remote_write)
+                    tg.start_soon(_pipe, remote_read, local_write)
+                LOG.info("backend session ended cleanly; will reconnect")
+        except (anyio.BrokenResourceError, anyio.EndOfStream,
+                ConnectionError, OSError) as e:
+            LOG.warning(
+                f"backend disconnected: {type(e).__name__}: {e}"
+            )
+        except Exception as e:  # noqa: BLE001
+            LOG.exception(f"unexpected proxy error: {e}")
+
+        if not session_succeeded:
+            consecutive_failures += 1
+        if consecutive_failures >= max_consecutive_failures:
+            LOG.error(
+                f"giving up after {consecutive_failures} consecutive backend "
+                f"failures; exiting (Claude Code's MCP supervisor will respawn)"
+            )
+            return
+
+        LOG.info(f"reconnecting to backend in {backoff:.1f}s "
+                 f"(consecutive failures: {consecutive_failures}/"
+                 f"{max_consecutive_failures})")
+        await sleep(backoff)
+        backoff = min(backoff * 2, max_backoff_s)
 
 
 async def _pipe(read_stream, write_stream) -> None:
     """Forward every message from `read_stream` to `write_stream`. Exits when
-    either end of the pair closes."""
+    either end of the pair closes.
+
+    NOTE: does **not** close `write_stream` on exit — the bridge loop
+    re-uses the local stdio across reconnects, so closing it would
+    terminate the whole proxy after the first backend disconnect. The
+    remote streams are owned by `streamablehttp_client`'s context manager
+    and get closed on its `__aexit__`."""
     try:
         async for msg in read_stream:
             await write_stream.send(msg)
     except anyio.BrokenResourceError:
         pass
-    finally:
-        try:
-            await write_stream.aclose()
-        except Exception:  # noqa: BLE001
-            pass

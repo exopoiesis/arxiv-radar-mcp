@@ -33,6 +33,8 @@ EXPECTED_TOOLS = {
     # async admin (6)
     "fetch_papers", "reindex", "refresh_abstracts",
     "job_status", "job_list", "list_enriched",
+    # pre-flight (1)
+    "validate_arxiv_ids",
 }
 
 
@@ -191,6 +193,26 @@ def test_radar_server_paper_info_carries_fulltext_status(local_config):
         radar.jobs.shutdown()
 
 
+def test_paper_info_full_abstract_returns_untruncated(local_config):
+    """U12: full_abstract=true skips the 600-char truncation."""
+    radar = RadarServer(local_config)
+    try:
+        # Tamper a corpus entry to have a long abstract.
+        p = radar.papers["2503.00001"]
+        p.abstract = "A" * 1500
+
+        truncated = _dispatch(radar, "paper_info", {"arxiv_id": "2503.00001"})
+        full = _dispatch(radar, "paper_info",
+                         {"arxiv_id": "2503.00001", "full_abstract": True})
+
+        assert truncated["abstract"].endswith("…")
+        assert len(truncated["abstract"]) == 601
+        assert len(full["abstract"]) == 1500
+        assert not full["abstract"].endswith("…")
+    finally:
+        radar.jobs.shutdown()
+
+
 def test_semantic_tools_return_error_when_no_index(local_config):
     radar = RadarServer(local_config)  # no embedding cache built
     try:
@@ -244,10 +266,163 @@ def test_fetch_papers_validates_input(local_config):
         radar.jobs.shutdown()
 
 
+def test_fetch_papers_accepts_force_arg(local_config):
+    """U9: force=true must be a documented MCP parameter that round-trips
+    through to fetch_and_save."""
+    radar = RadarServer(local_config)
+    try:
+        out = _dispatch(radar, "fetch_papers",
+                        {"arxiv_ids": ["2503.12345"], "force": True})
+        assert "job_id" in out
+        assert out["force"] is True
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_fetch_papers_force_threaded_to_fetch_and_save(local_config, monkeypatch):
+    """When force=True, the worker must pass force=True to fetch_and_save."""
+    import time as _time
+    radar = RadarServer(local_config)
+    try:
+        seen: list[bool] = []
+
+        def fake_fetch_and_save(arxiv_id, fulltext_dir, *, force=False, client=None):
+            seen.append(force)
+            from arxiv_radar_mcp.fulltext import FetchResult
+            return FetchResult(arxiv_id=arxiv_id, source="html",
+                               markdown="x", n_chars=1, error=None)
+
+        monkeypatch.setattr("arxiv_radar_mcp.server.fetch_and_save",
+                            fake_fetch_and_save)
+
+        out = _dispatch(radar, "fetch_papers",
+                        {"arxiv_ids": ["2503.12345"], "force": True})
+        # Wait for the job to finish.
+        deadline = _time.time() + 5
+        while _time.time() < deadline:
+            info = radar.jobs.get(out["job_id"])
+            if info and info["state"] in ("done", "failed"):
+                break
+            _time.sleep(0.05)
+        assert seen == [True]
+    finally:
+        radar.jobs.shutdown()
+
+
 def test_job_status_unknown_id_returns_error(local_config):
     radar = RadarServer(local_config)
     try:
         out = _dispatch(radar, "job_status", {"job_id": "nonexistent"})
+        assert "error" in out
+    finally:
+        radar.jobs.shutdown()
+
+
+# ----- U5: list_tags filtering -----------------------------------------------
+
+
+def test_list_tags_default_unfiltered_returns_all(local_config):
+    """Without args, list_tags returns every tag, sorted by frequency.
+    Same as before U5 — the fixture corpus has only a few tags so the
+    default head_limit doesn't truncate it."""
+    radar = RadarServer(local_config)
+    try:
+        out = _dispatch(radar, "list_tags", {})
+        names = {row["tag"] for row in out}
+        assert {"dft", "ab-initio", "mlip", "gnn",
+                "generative-model", "catalysis"} <= names
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_list_tags_head_limit_caps_output(local_config):
+    radar = RadarServer(local_config)
+    try:
+        out = _dispatch(radar, "list_tags", {"head_limit": 2})
+        assert len(out) == 2
+        # Highest-frequency tags first; in the fixture all tags have count 1
+        # so we just check we didn't return everything.
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_list_tags_min_count_filters(local_config):
+    """min_count=2 drops singleton tags. Fixture has all-singletons → empty."""
+    radar = RadarServer(local_config)
+    try:
+        out = _dispatch(radar, "list_tags", {"min_count": 2})
+        assert out == []
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_list_tags_prefix_filter(local_config):
+    radar = RadarServer(local_config)
+    try:
+        out = _dispatch(radar, "list_tags", {"prefix": "d"})
+        names = {row["tag"] for row in out}
+        assert "dft" in names
+        assert "mlip" not in names
+    finally:
+        radar.jobs.shutdown()
+
+
+# ----- U2: validate_arxiv_ids -------------------------------------------------
+
+
+def test_validate_arxiv_ids_partitions_ok_and_pdf_only(local_config, monkeypatch):
+    """HEAD-probe every id, partition into {ok, pdf_only}. Nothing fancy:
+    if probe returns True the id has an HTML render (or a stub — caller can
+    still try); if False arxiv has no HTML for it (PDF-only)."""
+    radar = RadarServer(local_config)
+    try:
+        # Stub the probe so we don't hit network. Even-suffix → ok, odd → pdf.
+        def fake_probe(arxiv_id, *, client=None):
+            return int(arxiv_id.replace(".", "")) % 2 == 0
+        monkeypatch.setattr("arxiv_radar_mcp.server.probe_html_available",
+                            fake_probe)
+
+        out = _dispatch(radar, "validate_arxiv_ids", {
+            "arxiv_ids": ["2503.00002", "2503.00003", "2504.00004", "2504.00005"],
+        })
+        assert out["n_total"] == 4
+        assert sorted(out["ok"]) == ["2503.00002", "2504.00004"]
+        assert sorted(out["pdf_only"]) == ["2503.00003", "2504.00005"]
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_validate_arxiv_ids_skips_probe_for_cached(local_config, monkeypatch, tmp_path):
+    """Already-enriched papers don't need a probe — count as ok and don't
+    burn arXiv ToS budget."""
+    radar = RadarServer(local_config)
+    try:
+        sources = radar.fulltext_dir / "sources"
+        sources.mkdir(parents=True, exist_ok=True)
+        (sources / "2503.99999.md").write_text("# cached\nbody", encoding="utf-8")
+        (sources / "2503.99999.meta.json").write_text(
+            '{"arxiv_id": "2503.99999", "source": "html"}', encoding="utf-8")
+
+        called: list[str] = []
+        def fake_probe(arxiv_id, *, client=None):
+            called.append(arxiv_id)
+            return False
+        monkeypatch.setattr("arxiv_radar_mcp.server.probe_html_available",
+                            fake_probe)
+
+        out = _dispatch(radar, "validate_arxiv_ids", {
+            "arxiv_ids": ["2503.99999", "2504.00000"],
+        })
+        assert "2503.99999" in out["ok"]
+        assert called == ["2504.00000"]  # only the uncached id was probed
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_validate_arxiv_ids_empty_list_errors(local_config):
+    radar = RadarServer(local_config)
+    try:
+        out = _dispatch(radar, "validate_arxiv_ids", {"arxiv_ids": []})
         assert "error" in out
     finally:
         radar.jobs.shutdown()

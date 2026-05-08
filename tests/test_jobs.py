@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from arxiv_radar_mcp.jobs import JobError, JobHandle, JobRegistry
+from arxiv_radar_mcp.jobs import Job, JobError, JobHandle, JobRegistry
 
 
 def _await_done(registry: JobRegistry, job_id: str, timeout: float = 5.0) -> dict:
@@ -190,4 +190,87 @@ def test_stale_lockfile_cleared_on_init(tmp_path: Path):
 
     reg = JobRegistry(cache_dir=tmp_path)
     assert not (fulltext / ".reindex.lock").exists()
+    reg.shutdown()
+
+
+def test_get_rereads_disk_when_inmemory_state_is_running(tmp_path: Path):
+    """U1: If in-memory says 'running' but disk has progressed to 'done',
+    get() must return the disk truth. Otherwise callers see stale 'running 0%'
+    long after the job actually finished — observed 3× during 2026-05-08
+    dogfood. Reading disk for terminal states is also cheap (small JSON).
+    """
+    reg = JobRegistry(cache_dir=tmp_path)
+
+    # In-memory job stuck in 'running 0%' (simulates a missed in-memory update).
+    reg._jobs["ghost"] = Job(  # noqa: SLF001
+        job_id="ghost", kind="demo", state="running",
+        progress=0.0, n_total=5, n_done=0,
+    )
+
+    # Disk reflects the actual completed state.
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir(exist_ok=True)
+    (jobs_dir / "ghost.json").write_text(json.dumps({
+        "job_id": "ghost", "kind": "demo", "state": "done",
+        "progress": 1.0, "n_total": 5, "n_done": 5,
+        "started_at": "2026-05-08T12:00:00+00:00",
+        "finished_at": "2026-05-08T12:01:00+00:00",
+        "result": {"ok": True}, "error": None, "args": {},
+    }), encoding="utf-8")
+
+    info = reg.get("ghost")
+    assert info is not None
+    assert info["state"] == "done"
+    assert info["progress"] == 1.0
+    assert info["result"] == {"ok": True}
+    reg.shutdown()
+
+
+def test_get_does_not_reread_disk_for_terminal_inmemory_state(tmp_path: Path):
+    """The disk-rehydrate path should only fire when in-memory state is
+    pending/running. Terminal states (done/failed/orphaned) are authoritative
+    in-memory because that's the last write _run made — no need to pay the
+    JSON-read cost."""
+    reg = JobRegistry(cache_dir=tmp_path)
+
+    def work(handle):
+        return {"answer": 42}
+
+    job_id = reg.submit("demo", work)
+    info = _await_done(reg, job_id)
+    assert info["state"] == "done"
+
+    # Tamper with the persisted file to a value that disagrees with memory.
+    # If get() were re-reading disk unconditionally, we'd see the tamper.
+    persisted = tmp_path / "jobs" / f"{job_id}.json"
+    persisted.write_text(json.dumps({
+        "job_id": job_id, "kind": "demo", "state": "failed",
+        "progress": 1.0, "n_total": 0, "n_done": 0,
+        "started_at": info["started_at"], "finished_at": info["finished_at"],
+        "result": {"answer": 42}, "error": "tampered", "args": {},
+    }), encoding="utf-8")
+
+    again = reg.get(job_id)
+    assert again["state"] == "done"  # memory wins for terminal states
+    assert again["error"] is None
+    reg.shutdown()
+
+
+def test_get_disk_reread_handles_corrupted_json(tmp_path: Path):
+    """Disk read is best-effort: corrupted JSON falls back to in-memory state
+    rather than crashing the tool call."""
+    reg = JobRegistry(cache_dir=tmp_path)
+    reg._jobs["ghost"] = Job(  # noqa: SLF001
+        job_id="ghost", kind="demo", state="running",
+        progress=0.5, n_total=4, n_done=2,
+    )
+
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir(exist_ok=True)
+    (jobs_dir / "ghost.json").write_text("{not valid json", encoding="utf-8")
+
+    info = reg.get("ghost")
+    assert info is not None
+    assert info["state"] == "running"
+    assert info["n_done"] == 2
     reg.shutdown()

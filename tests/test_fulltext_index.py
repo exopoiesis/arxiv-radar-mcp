@@ -7,6 +7,8 @@ exercised in the gomer scenario scripts (tmp/scenario_*.sh).
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -116,6 +118,31 @@ def test_search_paper_semantic_includes_snippet_when_text_provided():
 
     out = search_paper_semantic(index, chunk_texts, qvec)
     assert "methods chunk" in out[0]["snippet"]
+
+
+def test_search_paper_semantic_snippet_chars_extends_default():
+    """U11: snippet_chars=600 returns ~600 chars instead of the default ~240,
+    so researchers can extract recipes/numbers without 3-5 narrow queries."""
+    long_text = "X " * 500   # 1000 chars
+    rows = [("p1", "Methods", long_text)]
+    index = _make_chunk_index(rows)
+    qvec = np.zeros(index.dims, dtype=np.float32); qvec[0] = 1.0
+
+    short = search_paper_semantic(index, [long_text], qvec, snippet_chars=240)
+    long  = search_paper_semantic(index, [long_text], qvec, snippet_chars=600)
+    # Default is shorter; explicit 600 returns more (within 10 chars margin
+    # for ellipsis + whitespace stripping).
+    assert len(long[0]["snippet"]) > len(short[0]["snippet"])
+    assert len(long[0]["snippet"]) >= 590
+
+
+def test_search_paper_text_snippet_chars_extends_default():
+    chunk_texts = ["alpha beta " + "X " * 500]
+    chunk_meta = [{"arxiv_id": "p1", "section": "Methods",
+                   "chunk_idx": 0, "n_chars": 1010}]
+    short = search_paper_text(chunk_texts, chunk_meta, "alpha", snippet_chars=240)
+    long  = search_paper_text(chunk_texts, chunk_meta, "alpha", snippet_chars=600)
+    assert len(long[0]["snippet"]) > len(short[0]["snippet"])
 
 
 def test_search_paper_semantic_empty_index():
@@ -476,3 +503,242 @@ def test_search_paper_text_filters_junk():
     sections = [r["section"] for r in out]
     assert "References" not in sections
     assert sections == ["Methods", "Results"]
+
+
+# ----- incremental reindex --------------------------------------------------
+
+
+class _SpyFakeEncoder:
+    """Fake encoder with deterministic dim-stable output and call recording.
+
+    Unlike _FakeEncoder, the dim is fixed so that two reindex calls always
+    produce same-shape output (required for incremental concat). The text-
+    derived row position is also stable, so encoding the same chunk twice
+    yields identical bytes (separately verified in the
+    'preserves unchanged rows byte-identical' test).
+    """
+
+    def __init__(self, dim: int = 8, model_name: str = "fake/encoder"):
+        self.dim = dim
+        self._model_name = model_name
+        self.config = type("C", (), {"embeddings": type("E", (), {
+            "batch_size": 32, "model": model_name})()})()
+        self._model = type("M", (), {"max_seq_length": 512})()
+        self.encoded_calls: list[list[str]] = []
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    def _ensure_loaded(self) -> None:
+        pass
+
+    def encode_passages(self, texts, show_progress=True,
+                        max_seq_length=512, batch_size=None):
+        self.encoded_calls.append(list(texts))
+        n = len(texts)
+        matrix = np.zeros((n, self.dim), dtype=np.float32)
+        for i, t in enumerate(texts):
+            slot = sum(ord(c) for c in t[:50]) % self.dim
+            matrix[i, slot] = 1.0
+        return matrix
+
+    @property
+    def total_encoded(self) -> int:
+        return sum(len(c) for c in self.encoded_calls)
+
+    @property
+    def encoded_texts(self) -> list[str]:
+        return [t for call in self.encoded_calls for t in call]
+
+
+def _write_paper(sources_dir: Path, arxiv_id: str, body: str | None = None) -> None:
+    """Create `<id>.md` + `<id>.meta.json` with reasonable defaults."""
+    if body is None:
+        body = (
+            f"## Methods\n{arxiv_id} methods body\n\n"
+            f"## Results\n{arxiv_id} results body\n"
+        )
+    (sources_dir / f"{arxiv_id}.md").write_text(body, encoding="utf-8")
+    (sources_dir / f"{arxiv_id}.meta.json").write_text(json.dumps({
+        "arxiv_id": arxiv_id, "source": "html",
+        "fetch_time": "2026-05-01T00:00:00",
+        "n_chars": len(body), "n_chunks_after_split": 0,
+    }), encoding="utf-8")
+
+
+def test_reindex_incremental_noop_when_no_changes(tmp_path: Path):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    _write_paper(sources, "p1")
+
+    enc = _SpyFakeEncoder(dim=8)
+    reindex(tmp_path, enc)               # first build → full (no existing index)
+    assert enc.total_encoded > 0
+    enc.encoded_calls.clear()
+
+    matrix_before = np.load(tmp_path / "embeddings.npy")
+    reindex(tmp_path, enc)               # second pass → noop
+
+    assert enc.total_encoded == 0, "noop reindex must not invoke the encoder"
+    matrix_after = np.load(tmp_path / "embeddings.npy")
+    np.testing.assert_array_equal(matrix_before, matrix_after)
+
+
+def test_reindex_incremental_appends_new_paper(tmp_path: Path):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    _write_paper(sources, "p1")
+
+    enc = _SpyFakeEncoder(dim=8)
+    reindex(tmp_path, enc)
+    n_before = np.load(tmp_path / "embeddings.npy").shape[0]
+    enc.encoded_calls.clear()
+
+    _write_paper(sources, "p2")
+    reindex(tmp_path, enc)
+
+    matrix_after = np.load(tmp_path / "embeddings.npy")
+    payload = json.loads((tmp_path / "index.json").read_text())
+
+    # Only p2 chunks were encoded, not p1's.
+    assert all("p2" in t for t in enc.encoded_texts), enc.encoded_texts
+    assert all("p1" not in t for t in enc.encoded_texts)
+
+    # Matrix grew by exactly p2's chunk count.
+    p1_chunks = sum(1 for c in payload["chunks"] if c["arxiv_id"] == "p1")
+    p2_chunks = sum(1 for c in payload["chunks"] if c["arxiv_id"] == "p2")
+    assert matrix_after.shape[0] == p1_chunks + p2_chunks
+    assert matrix_after.shape[0] > n_before
+    # row_for[p1] preserved at row 0; p2 follows.
+    assert payload["row_for"]["p1"] == 0
+    assert payload["row_for"]["p2"] == p1_chunks
+    assert payload["n_papers"] == 2
+
+
+def test_reindex_incremental_drops_deleted_paper(tmp_path: Path):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    _write_paper(sources, "p1")
+    _write_paper(sources, "p2")
+
+    enc = _SpyFakeEncoder(dim=8)
+    reindex(tmp_path, enc)
+
+    # Delete p2's source — meta is left behind, classification keys off .md
+    # only, which is the correct contract.
+    (sources / "p2.md").unlink()
+    enc.encoded_calls.clear()
+
+    reindex(tmp_path, enc)
+
+    # No re-encode happened (only deletions).
+    assert enc.total_encoded == 0
+
+    payload = json.loads((tmp_path / "index.json").read_text())
+    pids = {c["arxiv_id"] for c in payload["chunks"]}
+    assert pids == {"p1"}
+    assert "p2" not in payload["row_for"]
+    assert payload["n_papers"] == 1
+
+
+def test_reindex_incremental_replaces_changed_paper(tmp_path: Path):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    _write_paper(sources, "p1")
+    _write_paper(sources, "p2")
+
+    enc = _SpyFakeEncoder(dim=8)
+    reindex(tmp_path, enc)
+    enc.encoded_calls.clear()
+
+    # Push p1.md mtime well past its meta.indexed_at + tolerance window.
+    p1_md = sources / "p1.md"
+    future = time.time() + 60
+    os.utime(p1_md, (future, future))
+
+    reindex(tmp_path, enc)
+
+    # Only p1 was re-encoded; p2 left alone.
+    encoded = enc.encoded_texts
+    assert encoded, "changed paper must be re-encoded"
+    assert all("p1" in t for t in encoded)
+    assert not any("p2" in t for t in encoded)
+
+    payload = json.loads((tmp_path / "index.json").read_text())
+    # Both still indexed; chunk count unchanged because content is unchanged.
+    pids = {c["arxiv_id"] for c in payload["chunks"]}
+    assert pids == {"p1", "p2"}
+    assert payload["n_papers"] == 2
+
+
+def test_reindex_falls_back_to_full_on_model_mismatch(tmp_path: Path):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    _write_paper(sources, "p1")
+    _write_paper(sources, "p2")
+
+    enc = _SpyFakeEncoder(dim=8, model_name="fake/encoder")
+    reindex(tmp_path, enc)
+
+    # Stamp the on-disk index with a different model name. Next reindex
+    # must detect the mismatch and re-encode every paper.
+    payload = json.loads((tmp_path / "index.json").read_text())
+    payload["model"] = "fake/other-model"
+    (tmp_path / "index.json").write_text(json.dumps(payload, indent=1),
+                                         encoding="utf-8")
+    enc.encoded_calls.clear()
+
+    reindex(tmp_path, enc)
+
+    # Full rebuild → every paper re-encoded.
+    encoded = enc.encoded_texts
+    assert any("p1" in t for t in encoded)
+    assert any("p2" in t for t in encoded)
+
+    payload2 = json.loads((tmp_path / "index.json").read_text())
+    assert payload2["model"] == "fake/encoder"
+
+
+def test_reindex_force_full_ignores_existing_index(tmp_path: Path):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    _write_paper(sources, "p1")
+    _write_paper(sources, "p2")
+
+    enc = _SpyFakeEncoder(dim=8)
+    reindex(tmp_path, enc)
+    enc.encoded_calls.clear()
+
+    # No source changes — incremental would no-op, but force_full re-encodes.
+    reindex(tmp_path, enc, incremental=False)
+
+    encoded = enc.encoded_texts
+    assert any("p1" in t for t in encoded)
+    assert any("p2" in t for t in encoded)
+
+
+def test_reindex_incremental_preserves_unchanged_rows_byte_identical(tmp_path: Path):
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    _write_paper(sources, "p1")
+
+    enc = _SpyFakeEncoder(dim=8)
+    reindex(tmp_path, enc)
+
+    matrix_v1 = np.load(tmp_path / "embeddings.npy")
+    payload_v1 = json.loads((tmp_path / "index.json").read_text())
+    p1_n_chunks = sum(1 for c in payload_v1["chunks"] if c["arxiv_id"] == "p1")
+    p1_rows_v1 = matrix_v1[:p1_n_chunks].tobytes()
+
+    _write_paper(sources, "p2")
+    enc.encoded_calls.clear()
+    reindex(tmp_path, enc)
+
+    matrix_v2 = np.load(tmp_path / "embeddings.npy")
+    p1_rows_v2 = matrix_v2[:p1_n_chunks].tobytes()
+
+    assert p1_rows_v1 == p1_rows_v2, (
+        "p1's rows must be byte-identical after incremental reindex — "
+        "they came from disk, not a fresh encode"
+    )

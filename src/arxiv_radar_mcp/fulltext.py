@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import tarfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -43,6 +44,58 @@ _EPRINT_URL = "https://arxiv.org/e-print/{id}"
 _USER_AGENT = "arxiv-radar-mcp/0.1 (+https://github.com/exopoiesis/arxiv-radar-mcp)"
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
+# arXiv ToS / robots.txt: no more than 1 outbound request / 3 seconds.
+# Module-global so HTML→LaTeX fallback within one paper AND consecutive
+# papers in a batch all share the rate limit. Thread-safe (jobs.py runs
+# fetch_papers on a worker thread).
+_RATE_LIMIT_S = 3.0
+_last_request_at = 0.0
+_rate_lock = threading.Lock()
+
+
+def _throttle() -> None:
+    """Block until the next arxiv.org GET respects the rate limit."""
+    global _last_request_at
+    with _rate_lock:
+        now = time.monotonic()
+        wait = _RATE_LIMIT_S - (now - _last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.monotonic()
+
+
+def _request_with_retry(
+    client: httpx.Client, url: str, *, max_attempts: int = 3,
+) -> httpx.Response:
+    """GET with arXiv rate-limit + exponential backoff on 429/503.
+
+    Honours `Retry-After` if present. Returns the final response (caller
+    decides what to do with non-200). Retries only on transient throttle
+    codes; 404/410/etc fall through unchanged.
+    """
+    backoff = _RATE_LIMIT_S
+    r: httpx.Response | None = None
+    for attempt in range(1, max_attempts + 1):
+        _throttle()
+        r = client.get(url)
+        if r.status_code not in (429, 503):
+            return r
+        if attempt == max_attempts:
+            return r
+        retry_after = r.headers.get("Retry-After")
+        try:
+            wait = float(retry_after) if retry_after else backoff
+        except (TypeError, ValueError):
+            wait = backoff
+        LOG.warning(
+            f"arxiv {r.status_code} on {url}; retry in {wait:.1f}s "
+            f"(attempt {attempt}/{max_attempts})"
+        )
+        time.sleep(wait)
+        backoff *= 2
+    assert r is not None  # loop body always assigns
+    return r
+
 
 @dataclass
 class FetchResult:
@@ -51,6 +104,42 @@ class FetchResult:
     markdown: str | None     # None on failure
     n_chars: int             # 0 on failure
     error: str | None        # human-readable reason on failure
+
+
+def probe_html_available(
+    arxiv_id: str, *, client: httpx.Client | None = None,
+) -> bool:
+    """HEAD arxiv.org/html/<id>; True iff the path exists (2xx/3xx).
+
+    Lightweight pre-flight for `validate_arxiv_ids`: a 404 means PDF-only
+    on arXiv (no HTML render), a 200 means the HTML path exists. We do
+    NOT inspect the body, so echo-skeleton / 'no HTML available' stub
+    pages still count as ok=True. Caller then knows to expect at least
+    one of HTML / e-print to work for those IDs.
+
+    Throttled by `_throttle()` on the same module-global lock as
+    `_request_with_retry`, so this and active fetches share arXiv's
+    1 req / 3 sec budget.
+    """
+    own_client = client is None
+    if own_client:
+        client = httpx.Client(
+            timeout=_TIMEOUT,
+            headers={"User-Agent": _USER_AGENT},
+            follow_redirects=True,
+        )
+    try:
+        url = _HTML_URL.format(id=arxiv_id)
+        _throttle()
+        try:
+            r = client.head(url)
+        except httpx.HTTPError as e:
+            LOG.info(f"probe {arxiv_id}: transport error {type(e).__name__}: {e}")
+            return False
+        return 200 <= r.status_code < 400
+    finally:
+        if own_client:
+            client.close()
 
 
 def fetch_paper(arxiv_id: str, *, client: httpx.Client | None = None) -> FetchResult:
@@ -150,11 +239,15 @@ def _fetch_html(arxiv_id: str, client: httpx.Client) -> str | None:
     """GET arxiv.org/html/<id>, return clean markdown or None.
 
     Returns None when the response is the "no HTML available" stub page that
-    arXiv serves (status 200 with a fallback message). Raises _FetchError
-    on non-200 responses.
+    arXiv serves (status 200 with a fallback message), OR when the body
+    parses to a "skeleton-only" render — section headings present but
+    every body is empty/echoes the heading (the `\\input{...}`-not-resolved
+    failure mode). In both cases callers fall through to the e-print path.
+
+    Raises _FetchError on non-200 responses.
     """
     url = _HTML_URL.format(id=arxiv_id)
-    r = client.get(url)
+    r = _request_with_retry(client, url)
     if r.status_code != 200:
         raise _FetchError(f"http {r.status_code}")
 
@@ -170,7 +263,91 @@ def _fetch_html(arxiv_id: str, client: httpx.Client) -> str | None:
     except ImportError as e:
         raise _FetchError(f"selectolax not installed: {e}") from e
 
-    return _html_to_markdown(body, parser_cls=HTMLParser)
+    md = _html_to_markdown(body, parser_cls=HTMLParser)
+    if md and _looks_like_echo_skeleton(md):
+        LOG.info(f"[{arxiv_id}] html render is echo-skeleton "
+                 f"(headings present, bodies empty); falling through to e-print")
+        return None
+    return md
+
+
+_NUM_PREFIX_RE = re.compile(
+    r"^(?:appendix\s+[a-z]+\s+|[0-9]+\.?\s+|[ivxlcdm]+\.?\s+|[a-z]\.\s+)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_heading_for_compare(text: str) -> str:
+    """Strip leading 'numbering' so '1 Introduction' compares equal to
+    'Introduction' when both are echo-skeleton renders. Handles:
+        '1 Introduction'     → 'introduction'
+        '1. Introduction'    → 'introduction'
+        'I Introduction'     → 'introduction'      (Roman)
+        'IV Methods'         → 'methods'
+        'A. Foo'             → 'foo'
+        'Appendix A Foo'     → 'foo'
+    """
+    out = text.strip().lower()
+    # repeat once — 'Appendix A Foo' → 'A Foo' → 'foo'
+    for _ in range(2):
+        new = _NUM_PREFIX_RE.sub("", out)
+        if new == out:
+            break
+        out = new
+    return out.strip()
+
+
+def _looks_like_echo_skeleton(md: str) -> bool:
+    """True iff the markdown looks like arXiv HTML's `\\input{}`-not-resolved
+    failure mode: every section heading is present, but the body of each
+    section is empty or just repeats the heading text.
+
+    Examples (real, observed 2026-05-08 in dogfood batch):
+        ## Abstract\n\nAbstract\n\n## 1 Introduction\n\nIntroduction\n\n...
+
+    Heuristic (tuned on 4 known-bad papers — 2411.12261, 2510.26991,
+    2604.21613, 2512.16803):
+      - need at least 3 ##/### headings to have a meaningful denominator
+      - for each (heading_i, heading_{i+1}) span, normalize the heading
+        text (drop "1 " / "I " / "Appendix A " prefixes) and treat the
+        body as pure-echo when it equals the normalized heading text
+      - skeleton if more than 70% of spans are <10 chars OR average body
+        length is <50 chars
+
+    Returns False for genuinely short papers (<3 headings) — those flow
+    through to e-print only on other failures.
+    """
+    lines = md.split("\n")
+    heading_idxs = [i for i, ln in enumerate(lines) if ln.startswith("#")]
+    if len(heading_idxs) < 3:
+        return False
+
+    body_lengths: list[int] = []
+    for k, hi in enumerate(heading_idxs):
+        end = heading_idxs[k + 1] if k + 1 < len(heading_idxs) else len(lines)
+        raw_heading = lines[hi].lstrip("#").strip()
+        heading_norm = _normalize_heading_for_compare(raw_heading)
+        body_text = "\n".join(lines[hi + 1:end]).strip()
+        body_norm = _normalize_heading_for_compare(body_text)
+        # Pure echo: body normalises to the heading
+        if body_norm == heading_norm:
+            body_lengths.append(0)
+            continue
+        # Body starts with the heading word and adds little after
+        stripped = body_text
+        if stripped.lower().startswith(raw_heading.lower()):
+            stripped = stripped[len(raw_heading):].strip()
+        elif body_norm.startswith(heading_norm) and heading_norm:
+            # length-conservative strip via lowercase index
+            idx = body_text.lower().find(heading_norm)
+            if idx != -1:
+                stripped = body_text[idx + len(heading_norm):].strip()
+        body_lengths.append(len(stripped))
+
+    n = len(body_lengths)
+    near_empty = sum(1 for s in body_lengths if s < 10)
+    avg = sum(body_lengths) / n
+    return (near_empty / n) > 0.70 or avg < 50
 
 
 def _html_to_markdown(html: str, *, parser_cls) -> str:
@@ -220,6 +397,49 @@ def _html_to_markdown(html: str, *, parser_cls) -> str:
     return _normalize_whitespace(text)
 
 
+def _iter_descendants(root):
+    """DFS pre-order over `root`'s descendants (text + element nodes).
+
+    Worked around two `selectolax` gotchas observed in the wild:
+
+      * `.traverse(include_text=True)` does not stay within the starting
+        node — it crosses out into siblings/ancestors, so calling it on
+        `div.ltx_abstract` happily yields the next `<section>` as well.
+        That leaked the whole article into our abstract render and made
+        the U10 echo-skeleton heuristic fire on perfectly good papers.
+      * When the consumer calls `n.decompose()` mid-walk, descendants
+        of `n` should also disappear from the iteration. With this DFS
+        we honour that by re-checking on each yield whether `n` is still
+        attached to `root`; orphans are silently skipped.
+    """
+    if root is None:
+        return
+
+    snapshot: list = []
+
+    def _push(parent) -> None:
+        for c in parent.iter(include_text=True):
+            snapshot.append(c)
+            if c.tag != "-text":
+                _push(c)
+
+    _push(root)
+
+    # Selectolax wraps the same DOM node in fresh Python objects on each
+    # access, so `is` is unreliable for parent-chain comparisons; the C
+    # extension implements `__eq__` to compare underlying nodes — use that.
+    for n in snapshot:
+        cur = n.parent
+        attached = False
+        while cur is not None:
+            if cur == root:
+                attached = True
+                break
+            cur = cur.parent
+        if attached:
+            yield n
+
+
 def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
     """Recursively render a node subtree to text/markdown.
 
@@ -243,7 +463,8 @@ def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
         (we emitted that one separately as title or abstract heading).
       - <script>/<style>/<nav>/pagination divs are dropped.
 
-    Walks all descendants in document order via selectolax's traverse().
+    Walks descendants in pre-order via `_iter_descendants` — see that
+    helper for why we don't use `selectolax.traverse()`.
     """
     if node is None:
         return ""
@@ -254,7 +475,7 @@ def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
     skip_classes = ("ltx_pagination", "ltx_navbar", "ltx_break")
     skip_tags = ("script", "style", "nav")
 
-    for n in node.traverse(include_text=True):
+    for n in _iter_descendants(node):
         if n.tag == "-text":
             txt = n.text() or ""
             if txt.strip():
@@ -281,6 +502,25 @@ def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
                 is_display = (n.attributes.get("display") == "block"
                               or "ltx_displaymath" in cls)
                 pieces.append(f"\n$$\n{tex}\n$$\n" if is_display else f"${tex}$")
+            n.decompose()
+            continue
+
+        # External anchor links — preserve the URL as inline markdown so
+        # DOI / repo / dataset links survive HTML→markdown→chunker. arxiv
+        # `\href{X}{Y}` lands as `<a href="X">Y</a>`. Internal fragments
+        # (`#fig-1`) are emitted as plain text without the URL — they're
+        # navigation hints, not citable resources.
+        if n.tag == "a":
+            href = (n.attributes.get("href") or "").strip()
+            link_text = _clean_text(n)
+            if not href or href.startswith("#") or href.startswith("javascript:"):
+                if link_text:
+                    pieces.append(link_text)
+            else:
+                if link_text:
+                    pieces.append(f"[{link_text}]({href})")
+                else:
+                    pieces.append(f"<{href}>")
             n.decompose()
             continue
 
@@ -373,7 +613,7 @@ def _normalize_whitespace(text: str) -> str:
 def _fetch_eprint(arxiv_id: str, client: httpx.Client) -> str | None:
     """GET arxiv.org/e-print/<id>, decode tarball, run pylatexenc."""
     url = _EPRINT_URL.format(id=arxiv_id)
-    r = client.get(url)
+    r = _request_with_retry(client, url)
     if r.status_code != 200:
         raise _FetchError(f"http {r.status_code}")
 

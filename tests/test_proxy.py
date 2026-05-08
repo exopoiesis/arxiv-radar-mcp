@@ -119,3 +119,142 @@ def test_run_proxy_errors_when_tunnel_fails_to_open(monkeypatch):
 
     rc = proxy.run_proxy(target="user@gomer", remote_port=8765, ssh_binary="ssh")
     assert rc == 3
+
+
+# ----- _bridge_loop reconnect logic ------------------------------------------
+
+
+import anyio
+
+
+class _FakeStream:
+    """Minimal async iterator that yields nothing (simulates a closed stream)."""
+
+    def __init__(self):
+        self._closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+    async def send(self, msg):
+        pass
+
+    async def aclose(self):
+        self._closed = True
+
+
+def test_bridge_loop_exits_after_max_consecutive_connection_failures():
+    """U8: when every connection attempt raises ConnectionError, the loop
+    must give up after max_consecutive_failures so Claude Code's MCP
+    supervisor can respawn the proxy."""
+
+    class _Connect:
+        attempts: list[int] = []
+
+        def __init__(self):
+            self.entered = False
+
+        async def __aenter__(self):
+            _Connect.attempts.append(1)
+            raise ConnectionError("backend unreachable")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    sleeps: list[float] = []
+    async def _fake_sleep(d):
+        sleeps.append(d)
+        # Don't actually sleep in tests.
+
+    async def _scenario():
+        await proxy._bridge_loop(
+            connect=lambda: _Connect(),
+            local_read=_FakeStream(),
+            local_write=_FakeStream(),
+            max_consecutive_failures=4,
+            sleep=_fake_sleep,
+        )
+
+    anyio.run(_scenario)
+    assert len(_Connect.attempts) == 4
+    # 3 sleeps between the 4 attempts; 4th attempt's failure triggers exit.
+    assert len(sleeps) == 3
+    # Exponential backoff: 1, 2, 4
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_bridge_loop_resets_counter_on_successful_session():
+    """A successful session establishment must reset the failure counter so
+    a flaky backend doesn't burn through the budget after one good session."""
+
+    class _Connect:
+        call_count = 0
+
+        def __init__(self):
+            self.session_should_succeed = (_Connect.call_count == 0)
+            _Connect.call_count += 1
+
+        async def __aenter__(self):
+            if not self.session_should_succeed:
+                raise ConnectionError("post-session failure")
+            return (_FakeStream(), _FakeStream(), None)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    async def _fake_sleep(d):
+        pass
+
+    async def _scenario():
+        await proxy._bridge_loop(
+            connect=lambda: _Connect(),
+            local_read=_FakeStream(),
+            local_write=_FakeStream(),
+            max_consecutive_failures=3,
+            sleep=_fake_sleep,
+        )
+
+    anyio.run(_scenario)
+    # Total: 1 success + 3 failures = 4 attempts. Without reset it would have
+    # exited after 3 attempts (success + 2 failures).
+    assert _Connect.call_count == 4
+
+
+def test_bridge_loop_caps_backoff_at_max():
+    """Backoff doubles from 1.0 but never exceeds max_backoff_s."""
+
+    class _Connect:
+        call_count = 0
+
+        def __init__(self):
+            _Connect.call_count += 1
+
+        async def __aenter__(self):
+            raise ConnectionError("nope")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    sleeps: list[float] = []
+    async def _fake_sleep(d):
+        sleeps.append(d)
+
+    async def _scenario():
+        await proxy._bridge_loop(
+            connect=lambda: _Connect(),
+            local_read=_FakeStream(),
+            local_write=_FakeStream(),
+            max_consecutive_failures=8,
+            max_backoff_s=5.0,
+            sleep=_fake_sleep,
+        )
+
+    anyio.run(_scenario)
+    # Sequence: 1, 2, 4, 5, 5, 5, 5 — capped at 5 once doubled past it.
+    assert all(s <= 5.0 for s in sleeps)
+    assert max(sleeps) == 5.0
+    # First three are 1, 2, 4 then capped.
+    assert sleeps[:3] == [1.0, 2.0, 4.0]

@@ -157,7 +157,32 @@ class JobRegistry:
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             job = self._jobs.get(job_id)
-            return job.to_dict() if job else None
+            if job is None:
+                return None
+            # U1 fix: when in-memory still says pending/running, the persisted
+            # jobs/<id>.json file is the source of truth — it gets written on
+            # every state change inside _run() under the same lock that
+            # mutates the dict, but the dict can lag behind disk in edge
+            # cases observed during 2026-05-08 dogfood (job_status returned
+            # 'running 0%' for 17+ min while job_list showed 'done'). For
+            # terminal states (done/failed/orphaned) the dict was the last
+            # writer so it stays authoritative — avoids the JSON-read cost
+            # on the common-case status poll.
+            if job.state in ("pending", "running"):
+                disk = self._read_persisted(job_id)
+                if disk is not None and disk.get("state") in (
+                    "done", "failed", "orphaned"
+                ):
+                    return disk
+            return job.to_dict()
+
+    def _read_persisted(self, job_id: str) -> dict[str, Any] | None:
+        """Read jobs/<job_id>.json off disk; None on missing/corrupt."""
+        path = self.jobs_dir / f"{job_id}.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return None
 
     def list_recent(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock:

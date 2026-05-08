@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from arxiv_radar_mcp.fulltext import (FetchResult, fetch_and_save, fetch_paper,
+                                      probe_html_available,
                                       _add_markdown_headings, _expand_inputs,
                                       _extract_main_tex, _pick_main_tex)
 
@@ -27,19 +28,23 @@ _FAKE_HTML = """<!DOCTYPE html>
 <head><title>Test paper</title></head>
 <body>
 <article>
-<h1 class="ltx_title_document">A test paper</h1>
+<h1 class="ltx_title ltx_title_document">A test paper</h1>
 <div class="ltx_authors">Alice and Bob</div>
 <div class="ltx_abstract">
-  <h6 class="ltx_title">Abstract</h6>
-  We test the fetcher.
+  <h6 class="ltx_title ltx_title_abstract">Abstract</h6>
+  <p>We test the fetcher and verify the HTML→markdown round-trip handles
+  abstracts, sections, and inline math correctly across multiple paragraphs
+  with non-trivial content so the echo-skeleton heuristic does not fire.</p>
 </div>
 <section class="ltx_section">
-  <h2 class="ltx_title">Methods</h2>
-  We do <math display="inline"><annotation encoding="application/x-tex">E = mc^2</annotation></math> things.
+  <h2 class="ltx_title ltx_title_section">Methods</h2>
+  <p>We do <math display="inline"><annotation encoding="application/x-tex">E = mc^2</annotation></math> things and a long methods description follows here so the chunker has something to bite on; the body needs at least fifty characters past the heading text to look like real content rather than an echo skeleton.</p>
 </section>
 <section class="ltx_section">
-  <h2 class="ltx_title">Results</h2>
-  Stuff worked.
+  <h2 class="ltx_title ltx_title_section">Results</h2>
+  <p>Stuff worked under the conditions described above; the experiments
+  produced numbers, tables, and figures consistent with the proposed
+  hypothesis across both training and held-out evaluation splits.</p>
 </section>
 </article>
 </body>
@@ -276,3 +281,103 @@ def test_fetch_and_save_force_refetches(tmp_path: Path):
         fetch_and_save("2503.99999", tmp_path, client=client, force=True)
 
     assert call_count["n"] == 2  # forced re-fetch
+
+
+# ----- probe_html_available (U2 dry-run validation) -------------------------
+
+
+def test_probe_html_available_true_on_200():
+    """HEAD returns 200 → paper has HTML render, /html/<id> path exists."""
+    seen_methods: list[str] = []
+
+    def handler(request):
+        seen_methods.append(request.method)
+        return httpx.Response(200)
+
+    with _client_with_handler(handler) as client:
+        ok = probe_html_available("2503.12345", client=client)
+
+    assert ok is True
+    assert seen_methods == ["HEAD"]  # HEAD only — no body cost
+
+
+def test_probe_html_available_false_on_404():
+    """HEAD returns 404 → PDF-only on arxiv (no HTML render)."""
+    def handler(request):
+        return httpx.Response(404)
+
+    with _client_with_handler(handler) as client:
+        ok = probe_html_available("2503.12345", client=client)
+
+    assert ok is False
+
+
+def test_probe_html_available_false_on_5xx():
+    """5xx is ambiguous — treat as not-ok so caller skips this id rather
+    than queuing a doomed fetch_papers entry."""
+    def handler(request):
+        return httpx.Response(503)
+
+    with _client_with_handler(handler) as client:
+        ok = probe_html_available("2503.12345", client=client)
+
+    assert ok is False
+
+
+def test_html_to_markdown_preserves_anchor_urls():
+    """U13: arxiv HTML often embeds DOI / repo URLs as <a href="X">Y</a>.
+    The parser used to strip the href; with the fix we emit `[Y](X)` so
+    the URL survives chunking + downstream display."""
+    from arxiv_radar_mcp.fulltext import _html_to_markdown
+    from selectolax.parser import HTMLParser
+
+    html = """<article>
+    <h1 class="ltx_title ltx_title_document">A test paper</h1>
+    <div class="ltx_abstract">
+      <h6 class="ltx_title ltx_title_abstract">Abstract</h6>
+      <p>We say things and link to <a href="https://github.com/exo/repo">our repo</a>
+      and a DOI <a href="https://doi.org/10.1234/abc">10.1234/abc</a> and an
+      external page that survives chunking and downstream rendering.</p>
+    </div>
+    </article>"""
+    md = _html_to_markdown(html, parser_cls=HTMLParser)
+    # Both the visible text and the URL must survive.
+    assert "https://github.com/exo/repo" in md
+    assert "https://doi.org/10.1234/abc" in md
+    assert "our repo" in md
+    # Markdown link syntax preferred so downstream renderers can hyperlink.
+    assert "[our repo](https://github.com/exo/repo)" in md or \
+           "our repo (https://github.com/exo/repo)" in md
+
+
+def test_html_to_markdown_drops_internal_anchor_links():
+    """Anchors that just point to in-document fragments (#fig-1) shouldn't
+    pollute the markdown with empty parens / orphan URLs."""
+    from arxiv_radar_mcp.fulltext import _html_to_markdown
+    from selectolax.parser import HTMLParser
+
+    html = """<article>
+    <h1 class="ltx_title ltx_title_document">T</h1>
+    <div class="ltx_abstract">
+      <h6 class="ltx_title ltx_title_abstract">Abstract</h6>
+      <p>See <a href="#fig-1">Figure 1</a> for the long body that the
+      heuristic needs to consider non-skeleton on this short test fixture.</p>
+    </div>
+    </article>"""
+    md = _html_to_markdown(html, parser_cls=HTMLParser)
+    assert "Figure 1" in md
+    # Internal fragment URL should NOT appear in the rendered text.
+    assert "(#fig-1)" not in md
+    assert "#fig-1" not in md
+
+
+def test_probe_html_available_handles_network_error():
+    """Transport-level failures shouldn't propagate — return False so the
+    rest of the batch keeps probing."""
+    def handler(request):
+        raise httpx.ConnectError("simulated")
+
+    with _client_with_handler(handler) as client:
+        ok = probe_html_available("2503.12345", client=client)
+
+    assert ok is False

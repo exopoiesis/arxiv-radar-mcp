@@ -3,7 +3,7 @@
 The actual streamable-HTTP server is exercised in the gomer scenario,
 not here. These tests verify the wiring around it: serve_http boots the
 right loop with the right host/port, and the underlying mcp app is
-constructed with our 14 tools intact.
+constructed with the full tool catalogue intact.
 """
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ def test_build_mcp_app_uses_tool_specs(local_config):
         assert app is not None
         # We can't easily call into the handler without an MCP context,
         # but TOOL_SPECS itself is the source of truth — guard against drift.
-        assert len(TOOL_SPECS) == 15
+        # 16 = 6 abstract + 3 fulltext + 6 admin + 1 pre-flight (validate_arxiv_ids).
+        assert len(TOOL_SPECS) == 16
     finally:
         radar.jobs.shutdown()
 

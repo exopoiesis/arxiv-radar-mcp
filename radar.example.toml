@@ -35,10 +35,10 @@ type   = "github"
 repo   = "exopoiesis/arxiv-radar-polymer"
 branch = "main"
 
-[sources.sulfide_materials]
-type   = "github"
-repo   = "exopoiesis/arxiv-radar-sulfide-materials"
-branch = "main"
+# Sulfide-materials feed merged into electrochemistry on 2026-05-08.
+# All 99 papers from the sulfide repo are now in [sources.electrochemistry]
+# with their original topics preserved. Don't re-add as a separate source —
+# it would double-count after radar.toml syncs.
 
 # [sources.local-dev]
 # type = "local"

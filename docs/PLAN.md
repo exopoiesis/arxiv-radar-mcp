@@ -178,34 +178,46 @@ Completed phases moved to `docs/PLAN_ARCHIVE.md`. Still pending:
 ## Code map
 
 ```
-src/arxiv_radar_mcp/
-├── __main__.py        # `arxiv-radar-mcp` entrypoint (--build-cache, serve)
-├── config.py          # radar.toml loader + defaults
-├── corpus.py          # Paper dataclass, loaders for github + local sources
-├── embeddings.py      # Encoder (lazy bi-encoder + prefixes), EmbeddingIndex, build_cache (abstracts)
-├── reranker.py        # Reranker class (kept, not wired to tools — see Р-010 in archive)
-├── search.py          # search_abstract_text/semantic, similar_to_abstract (abstract index ops)
-├── fulltext.py        # HTML/LaTeX fetcher (selectolax + pylatexenc); source-cascade per arxiv_id;
-                       # _throttle + _request_with_retry (Р-018);
-                       # _looks_like_echo_skeleton + _normalize_heading_for_compare (U10);
-                       # probe_html_available (U2);
-                       # _iter_descendants — DFS replacement for selectolax.traverse (U10b);
-                       # anchor-href preservation in _node_to_markdown (U13)
-├── chunker.py         # split markdown by ## headings; sub-split sections >max_seq_length
-├── fulltext_index.py  # reindex (incremental by default — Р-017); search_paper_text/semantic; similar_to_paper
-├── jobs.py            # JobRegistry: ThreadPoolExecutor + persistent jobs/<id>.json + lockfile;
-                       # disk-truth fallback in get() for stale in-memory running state (U1)
-├── refresh.py         # daily refresh: git pull → diff → encode new → atomic swap (Р-016)
-├── proxy.py           # local stdio→remote-HTTP proxy with SSH tunnel (--remote mode);
-                       # _bridge_loop reconnects on backend disconnect (U8 Option B)
-├── fulltext_cli.py    # `python -m arxiv_radar_mcp.fulltext_cli` — fetch helper for in-container use
-├── reindex_cli.py     # `python -m arxiv_radar_mcp.reindex_cli` — reindex helper for in-container use
-└── server.py          # RadarServer holds {abstract_index, fulltext_index, jobs};
-                       # TOOL_SPECS (16 tools — incl. validate_arxiv_ids U2);
-                       # list_tags filters (U5), fetch_papers force flag (U9),
-                       # search_paper_* snippet_chars (U11), paper_info full_abstract (U12);
-                       # serve() stdio + serve_http() streamable-HTTP;
-                       # _refresh_loop() asyncio background task
+src/
+├── corpus_core/         # SHARED INFRASTRUCTURE — phase-1 in-place extract
+│   │                    # for arxiv-radar-mcp + lab-corpus-mcp.
+│   │                    # See src/corpus_core/README.md and
+│   │                    # docs/PLAN_CORE_EXTRACTION.md.
+│   ├── __init__.py      # public API re-exports
+│   ├── README.md        # public API + invariants for downstream
+│   ├── embeddings.py    # Encoder (lazy bi-encoder + prefixes), EmbeddingIndex
+│   ├── reranker.py      # Reranker class (kept, not wired to tools — Р-010)
+│   ├── search.py        # search_text/semantic/similar_to (abstract-level)
+│   ├── chunker.py       # split markdown by ## headings; sub-split big sections
+│   ├── corpus_index.py  # was fulltext_index.py — chunk-level corpus search;
+│   │                    # reindex (incremental by default — Р-017);
+│   │                    # search_paper_text/semantic; similar_to_paper
+│   ├── jobs.py          # JobRegistry: ThreadPoolExecutor + persistent jobs/<id>.json;
+│   │                    # disk-truth fallback in get() for stale running state (U1)
+│   └── proxy.py         # local stdio→remote-HTTP bridge with SSH tunnel;
+│                        # _bridge_loop reconnects on backend disconnect (U8 Option B)
+│
+└── arxiv_radar_mcp/     # arxiv-radar-mcp shell (arxiv-specific only)
+    ├── __main__.py      # `arxiv-radar-mcp` entrypoint (--build-cache, serve)
+    ├── config.py        # radar.toml loader + defaults
+    ├── corpus.py        # Paper dataclass, loaders for github + local sources
+    ├── build_cache.py   # `--build-cache` CLI orchestrator (uses corpus_core.Encoder)
+    ├── fulltext.py      # HTML/LaTeX fetcher (selectolax + pylatexenc); source-cascade per arxiv_id;
+    │                    # _throttle + _request_with_retry (Р-018);
+    │                    # _looks_like_echo_skeleton + _normalize_heading_for_compare (U10);
+    │                    # probe_html_available (U2);
+    │                    # _iter_descendants — DFS replacement for selectolax.traverse (U10b);
+    │                    # anchor-href preservation in _node_to_markdown (U13)
+    ├── refresh.py       # daily refresh: git pull → diff → encode new → atomic swap (Р-016)
+    ├── fulltext_cli.py  # `python -m arxiv_radar_mcp.fulltext_cli` — fetch helper for in-container use
+    ├── reindex_cli.py   # `python -m arxiv_radar_mcp.reindex_cli` — reindex helper for in-container use
+    └── server.py        # RadarServer holds {abstract_index, fulltext_index, jobs};
+                         # TOOL_SPECS (16 tools — incl. validate_arxiv_ids U2);
+                         # list_tags filters (U5), fetch_papers force flag (U9),
+                         # search_paper_* snippet_chars (U11), paper_info full_abstract (U12);
+                         # serve() stdio + serve_http() streamable-HTTP;
+                         # _refresh_loop() asyncio background task;
+                         # imports infrastructure from corpus_core
 
 Dockerfile             # GPU image: pytorch/cuda12.4 + this code, ~10 GB
 .dockerignore          # strips tests/tmp/docs/.venv from build context
@@ -223,6 +235,9 @@ chunker, fulltext-source cascade with mocked httpx, jobs lifecycle +
 persistence, fulltext_index search primitives with a fake encoder,
 RadarServer end-to-end against a synthetic 3-paper corpus, U10
 echo-skeleton detector regression (`test_fulltext_echo_skeleton.py`).
+After Phase-1 extraction these tests double as `corpus_core` tests
+(see `docs/PLAN_CORE_EXTRACTION.md`); they'll move with the modules
+when Phase 3 ships corpus-core to its own repo.
 
 Encoder-dependent paths (live semantic search, similar_to_*, real
 reindex on GPU) are covered by gomer scenario scripts in

@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 
 from arxiv_radar_mcp.config import load
-from arxiv_radar_mcp.embeddings import Encoder
-from arxiv_radar_mcp.fulltext_index import reindex
+from corpus_core.embeddings import Encoder
+from corpus_core.corpus_index import reindex
 
 
 def main() -> int:

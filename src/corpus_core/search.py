@@ -14,7 +14,7 @@ from typing import Iterable
 import numpy as np
 
 from arxiv_radar_mcp.corpus import Paper
-from arxiv_radar_mcp.embeddings import EmbeddingIndex
+from corpus_core.embeddings import EmbeddingIndex
 
 
 def _filter(papers: Iterable[Paper],

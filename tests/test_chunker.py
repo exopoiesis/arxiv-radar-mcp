@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from arxiv_radar_mcp.chunker import (Chunk, chunk_markdown, estimate_tokens,
+from corpus_core.chunker import (Chunk, chunk_markdown, estimate_tokens,
                                      split_by_headings, split_long_section)
 
 
@@ -166,7 +166,7 @@ def test_chunk_markdown_default_max_tokens_is_4096():
     sections land in the medium encode bucket (~5-10× reindex speedup).
     Encoder seq window in fulltext_index follows the same value."""
     import inspect
-    from arxiv_radar_mcp.fulltext_index import FULLTEXT_MAX_SEQ_LENGTH
+    from corpus_core.corpus_index import FULLTEXT_MAX_SEQ_LENGTH
     sig = inspect.signature(chunk_markdown)
     assert sig.parameters["max_tokens"].default == 4_096
     assert FULLTEXT_MAX_SEQ_LENGTH == 4_096

@@ -11,7 +11,7 @@ import pytest
 
 from arxiv_radar_mcp.config import RerankerConfig
 from arxiv_radar_mcp.corpus import Paper
-from arxiv_radar_mcp.reranker import Reranker
+from corpus_core.reranker import Reranker
 
 
 def _make_paper(arxiv_id: str, title: str) -> Paper:

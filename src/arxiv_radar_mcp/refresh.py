@@ -32,8 +32,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from arxiv_radar_mcp.embeddings import EmbeddingIndex
-from arxiv_radar_mcp.jobs import JobError
+from corpus_core.embeddings import EmbeddingIndex
+from corpus_core.jobs import JobError
 
 if TYPE_CHECKING:
     from arxiv_radar_mcp.server import RadarServer

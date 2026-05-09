@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from arxiv_radar_mcp.embeddings import EmbeddingIndex
-from arxiv_radar_mcp.fulltext_index import (load_chunk_texts, reindex,
+from corpus_core.embeddings import EmbeddingIndex
+from corpus_core.corpus_index import (load_chunk_texts, reindex,
                                             search_paper_semantic,
                                             search_paper_text,
                                             similar_to_paper)
@@ -239,7 +239,7 @@ def test_load_chunk_texts_handles_missing_source(tmp_path: Path):
 
 
 class _FakeEncoder:
-    """Stand-in for arxiv_radar_mcp.embeddings.Encoder in unit tests."""
+    """Stand-in for corpus_core.embeddings.Encoder in unit tests."""
 
     def __init__(self, dim: int = 4):
         self.dim = dim
@@ -344,8 +344,8 @@ def test_encode_bucketed_preserves_original_order(tmp_path: Path):
     """When chunks are split into buckets and encoded separately, the
     final matrix must put each row back at its original index — otherwise
     chunk_meta and embeddings.npy would be misaligned."""
-    from arxiv_radar_mcp.chunker import Chunk
-    from arxiv_radar_mcp.fulltext_index import _encode_bucketed
+    from corpus_core.chunker import Chunk
+    from corpus_core.corpus_index import _encode_bucketed
 
     # Mix of short (≤512), medium (≤2048), and long (>2048) chunks.
     chunks = [
@@ -370,7 +370,7 @@ def test_encode_bucketed_preserves_original_order(tmp_path: Path):
 
 
 def test_encode_bucketed_empty_chunks():
-    from arxiv_radar_mcp.fulltext_index import _encode_bucketed
+    from corpus_core.corpus_index import _encode_bucketed
     enc = _FakeEncoder()
     matrix, stats = _encode_bucketed(enc, [])
     assert matrix.shape == (0, enc.dim) or matrix.shape[0] == 0
@@ -417,14 +417,14 @@ def test_encode_bucketed_empty_chunks():
     ("", False),
 ])
 def test_is_junk_section_classifies_correctly(section, expected):
-    from arxiv_radar_mcp.fulltext_index import is_junk_section
+    from corpus_core.corpus_index import is_junk_section
     assert is_junk_section(section) == expected, f"{section!r} → expected {expected}"
 
 
 def test_search_paper_semantic_filters_junk():
     """Junk sections should be skipped in favour of clean ones from the
     oversample pool, even when junk has higher cosine score."""
-    from arxiv_radar_mcp.fulltext_index import search_paper_semantic
+    from corpus_core.corpus_index import search_paper_semantic
 
     # 6 rows: row 0 (References, top-score), rows 1-5 (clean sections)
     n = 6
@@ -460,7 +460,7 @@ def test_search_paper_semantic_filters_junk():
 def test_search_paper_semantic_falls_back_to_junk_when_short():
     """If the corpus is mostly junk, we still return what we have rather
     than an empty list."""
-    from arxiv_radar_mcp.fulltext_index import search_paper_semantic
+    from corpus_core.corpus_index import search_paper_semantic
 
     chunks = [
         {"arxiv_id": "p1", "section": "References", "chunk_idx": 0, "n_chars": 100},
@@ -487,7 +487,7 @@ def test_search_paper_semantic_falls_back_to_junk_when_short():
 
 def test_search_paper_text_filters_junk():
     """Same junk filter applied to text search."""
-    from arxiv_radar_mcp.fulltext_index import search_paper_text
+    from corpus_core.corpus_index import search_paper_text
 
     chunk_texts = [
         "alpha beta gamma — references list with alpha beta",     # References (high score)

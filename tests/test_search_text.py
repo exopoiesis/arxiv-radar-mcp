@@ -1,6 +1,6 @@
 """Text search has no model deps — testable end-to-end."""
 from arxiv_radar_mcp.corpus import load_all
-from arxiv_radar_mcp.search import search_text
+from corpus_core.search import search_text
 
 
 def test_search_text_finds_keyword_in_abstract(local_config):

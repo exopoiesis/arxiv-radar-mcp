@@ -39,8 +39,8 @@ from typing import Iterable
 
 import numpy as np
 
-from arxiv_radar_mcp.chunker import Chunk, chunk_markdown
-from arxiv_radar_mcp.embeddings import EmbeddingIndex, Encoder
+from corpus_core.chunker import Chunk, chunk_markdown
+from corpus_core.embeddings import EmbeddingIndex, Encoder
 
 LOG = logging.getLogger(__name__)
 

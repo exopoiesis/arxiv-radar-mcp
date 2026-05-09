@@ -10,7 +10,7 @@ import socket
 
 import pytest
 
-from arxiv_radar_mcp import proxy
+from corpus_core import proxy
 
 
 # ----- _pick_free_port -------------------------------------------------------

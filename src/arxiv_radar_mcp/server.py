@@ -27,16 +27,16 @@ import httpx
 
 from arxiv_radar_mcp.config import Config, load
 from arxiv_radar_mcp.corpus import Paper, load_all
-from arxiv_radar_mcp.embeddings import EmbeddingIndex, Encoder
+from corpus_core.embeddings import EmbeddingIndex, Encoder
 from arxiv_radar_mcp.fulltext import fetch_and_save, probe_html_available
-from arxiv_radar_mcp.fulltext_index import (FULLTEXT_MAX_SEQ_LENGTH,
+from corpus_core.corpus_index import (FULLTEXT_MAX_SEQ_LENGTH,
                                             load_chunk_texts, reindex,
                                             search_paper_semantic,
                                             search_paper_text,
                                             similar_to_paper)
-from arxiv_radar_mcp.jobs import JobError, JobHandle, JobRegistry
+from corpus_core.jobs import JobError, JobHandle, JobRegistry
 from arxiv_radar_mcp.refresh import refresh_sources
-from arxiv_radar_mcp.search import (search_semantic, search_text, similar_to)
+from corpus_core.search import (search_semantic, search_text, similar_to)
 
 LOG = logging.getLogger(__name__)
 

@@ -125,7 +125,7 @@ def test_atomic_save_overwrites_existing(tmp_path: Path):
 
 
 class _FakeEncoder:
-    """Drop-in for arxiv_radar_mcp.embeddings.Encoder."""
+    """Drop-in for corpus_core.embeddings.Encoder."""
 
     def __init__(self, dim: int = 4):
         self.dim = dim
@@ -207,7 +207,7 @@ def test_refresh_incremental_only_encodes_added(monkeypatch, tmp_path: Path):
     radar = _FakeRadar(papers=initial, encoder=enc, cache_dir=tmp_path, sources=sources)
 
     # Pre-seed an existing abstract index so the incremental path can find it.
-    from arxiv_radar_mcp.embeddings import EmbeddingIndex
+    from corpus_core.embeddings import EmbeddingIndex
     existing_matrix = np.ones((2, enc.dim), dtype=np.float32)
     radar.abstract_index = EmbeddingIndex(
         matrix=existing_matrix,
@@ -238,7 +238,7 @@ def test_refresh_forces_full_when_papers_deleted(monkeypatch, tmp_path: Path):
 
     enc = _FakeEncoder()
     radar = _FakeRadar(papers=initial, encoder=enc, cache_dir=tmp_path, sources=sources)
-    from arxiv_radar_mcp.embeddings import EmbeddingIndex
+    from corpus_core.embeddings import EmbeddingIndex
     radar.abstract_index = EmbeddingIndex(
         matrix=np.ones((5, enc.dim), dtype=np.float32),
         row_for={f"p{i}": i for i in range(5)},
@@ -259,7 +259,7 @@ def test_refresh_noop_when_nothing_changed(monkeypatch, tmp_path: Path):
 
     enc = _FakeEncoder()
     radar = _FakeRadar(papers=same, encoder=enc, cache_dir=tmp_path, sources=sources)
-    from arxiv_radar_mcp.embeddings import EmbeddingIndex
+    from corpus_core.embeddings import EmbeddingIndex
     radar.abstract_index = EmbeddingIndex(
         matrix=np.ones((2, enc.dim), dtype=np.float32),
         row_for={"p1": 0, "p2": 1},

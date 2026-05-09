@@ -27,13 +27,13 @@ def _run(monkeypatch, argv, **patches):
 
     # We patch the *importable* function names in their original modules so
     # the deferred imports inside main() pick up the stub.
-    monkeypatch.setattr("arxiv_radar_mcp.embeddings.build_cache",
+    monkeypatch.setattr("arxiv_radar_mcp.build_cache.build_cache",
                         _make_recorder("build_cache"))
     monkeypatch.setattr("arxiv_radar_mcp.server.serve",
                         _make_recorder("serve"))
     monkeypatch.setattr("arxiv_radar_mcp.server.serve_http",
                         _make_recorder("serve_http"))
-    monkeypatch.setattr("arxiv_radar_mcp.proxy.run_proxy",
+    monkeypatch.setattr("corpus_core.proxy.run_proxy",
                         _make_recorder("run_proxy"))
 
     rc = cli.main()

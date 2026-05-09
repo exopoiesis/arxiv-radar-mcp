@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from arxiv_radar_mcp.embeddings import (Encoder, _maybe_truncate, passage_prefix, query_prefix)
+from corpus_core.embeddings import (Encoder, _maybe_truncate, passage_prefix, query_prefix)
 
 
 # ----- prefix registry ------------------------------------------------------

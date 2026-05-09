@@ -78,7 +78,7 @@ def main() -> int:
     # Mode selection — at most one of {build-cache, transport=http, remote}.
     # build-cache always wins; remote and transport=http are mutually exclusive.
     if args.build_cache:
-        from arxiv_radar_mcp.embeddings import build_cache
+        from arxiv_radar_mcp.build_cache import build_cache
         build_cache(config_path=args.config)
         return 0
 
@@ -87,7 +87,7 @@ def main() -> int:
                      "the proxy itself runs on stdio")
 
     if args.remote:
-        from arxiv_radar_mcp.proxy import run_proxy
+        from corpus_core.proxy import run_proxy
         return run_proxy(
             target=args.remote,
             remote_port=args.remote_port,

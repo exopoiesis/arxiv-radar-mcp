@@ -118,7 +118,16 @@ severity.
 | # | Title | Severity | Where | Fix size | Notes |
 |---|-------|:---:|---|:---:|---|
 | U4 | **Domain feed coverage gap for our use case (Fe-S sulfide chemistry)** | HIGH (project-specific) | `radar.toml` source feed selection upstream in `arxiv-radar-*` forks | external repo | Searched for known important authors/keywords: `Sundararaman` 0 hits, `Marx` 0 hits, `Roldan iron sulfide` 0 hits, `mackinawite` 0 hits, `Beyazay` 0 hits, `Muchowska` 0 hits. All these have arXiv preprints — they just aren't in the `arxiv-radar-*` filter results. Specifically: `mackinawite` is a centerpiece mineral of the Third Matter project but doesn't show up at all. **Two complementary fixes (in the *fork* not this server):** (a) keyword-trigger inclusion: any paper whose abstract contains a curated mineral term (mackinawite/pentlandite/greigite/pyrrhotite/troilite/chalcopyrite) auto-enters `sulfide_materials`; (b) author-whitelist feed: a small list of high-signal authors (Sundararaman, Marx, Roldan, Santos-Carballal, Behler, Csányi, Reuter, Andreussi) gets every preprint pulled regardless of category match. |
-| U7 | **Project-level: PDF-only papers (12 in dogfood batch) need an out-of-band pipeline** | MEDIUM | scope choice (see [РЕШЕНИЕ-013] in archive — PDF intentionally not supported) | architectural | The dogfood session caught real research papers that are PDF-only on arXiv (e.g. `2512.14129` Yin pyrrhotite, the highest-value hit for the user's T11 test). [РЕШЕНИЕ-013] said PDF is out of scope because the failure rate is "10-15%" — but our session saw 26% (12/45). At project-specific corpora the rate may be higher than the arXiv average. **Options to consider:** (a) opt-in PDF parser via extra (`pip install arxiv-radar-mcp[pdf]` → MinerU or marker), gated by `radar.toml [fulltext.pdf] enabled = false`; (b) a thin `fetch_papers_pdf` companion tool that just downloads PDFs to `<cache_dir>/fulltext/pdf_pending/<id>.pdf` for the user to process out-of-band. Decision deferred — list of 12 papers from this session is in the user's project at `knowledge/lit_pdf_only_pending_2026-05-08.md`. The U2 `validate_arxiv_ids` tool now lets the LLM warn the user up front about pdf-only IDs in a batch, partial mitigation. |
+
+> **U7 RESOLVED (2026-05-09 → 10):** PDF-only papers handled by the
+> sibling [`lab-corpus-mcp`](https://github.com/exopoiesis/lab-corpus-mcp)
+> server's `ingest_pdf` / `ingest_local_dir` tools (MinerU `pipeline`
+> backend, ~90 sec per 2 MB PDF on RTX 4070). End-to-end verified on
+> `2512.14129` (Yin et al., (Cr,Fe)S pyrrhotite) — the exact paper
+> from the dogfood batch that triggered this issue. arxiv-radar-mcp
+> stays focused on HTML/LaTeX cascade; PDF-only IDs go to the lab
+> sibling. Cross-image VRAM footprint solved by `lab_corpus_mcp.combined`
+> running both servers in one process with one shared Qwen Encoder.
 
 ---
 
@@ -182,10 +191,10 @@ Completed phases moved to `docs/PLAN_ARCHIVE.md`. Still pending:
 
 | # | Goal | Status |
 |---|------|--------|
-| 3 | First user: connect to Claude Desktop, dogfood for a week | partial — 2026-05-08 dogfood session via Claude Code (this repo). Claude Desktop integration not yet exercised. |
+| 3 | First user: connect to Claude Desktop, dogfood for a week | partial — 2026-05-08 dogfood via Claude Code; 2026-05-09 → 10 production deploy on gomer (combined image, both backends, one Qwen). Claude Desktop integration via stdio→HTTP proxy still unexercised. |
 | 5 | BM25 upgrade if text relevance complaints surface | pending |
-| 6 | PyPI release | pending |
-| — | Non-arXiv content (PDFs without arxiv_id, video, books) | scope choice — see U7 (PDF rate ended up higher than [Р-013] предположил) |
+| 6 | PyPI release (Phase 6) | pending — corpus-core also pending PyPI publish (separate timeline) |
+| — | Non-arXiv content (PDFs without arxiv_id, video, books) | **DONE 2026-05-10** — PDFs handled by lab-corpus-mcp's `ingest_pdf` / `ingest_local_dir` tools. Video / books still on lab-corpus-mcp's roadmap. |
 
 ---
 

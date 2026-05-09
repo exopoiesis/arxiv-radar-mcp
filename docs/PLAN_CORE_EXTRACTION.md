@@ -193,25 +193,45 @@ Name decided: `corpus-core` (PyPI distribution name) /
 
 **Do NOT publish to PyPI yet.** Let the API stabilise through Phase 2.
 
-### Phase 2 — `lab-corpus-mcp` scaffold (1–2 sessions in new repo)
+### Phase 2 — `lab-corpus-mcp` scaffold — DONE 2026-05-09 → 10
 
-1. Create `exopoiesis/lab-corpus-mcp` repo.
-2. `pyproject.toml`: depend on `arxiv-radar-mcp[corpus_core-only]`
-   (extras_require pointing to local subpackage), or path-install for
-   dev: `pip install -e ../arxiv-radar-mcp` and import `corpus_core` from there.
-3. Build PDF fetcher first (most-needed feature, U7 trigger). Use
-   MinerU; benchmark vs marker.
-4. Multi-source paper_id schema in `corpus.py`.
-5. Reuse `JobRegistry`, `EmbeddingIndex`, MCP scaffold from `corpus_core`.
-6. Tool catalogue: `ingest_pdf`, `ingest_local_dir`, `search_paper_*`,
-   `paper_info`, `job_status`, `job_list`.
-7. Test against a real lab-corpus mini-batch (10–20 PDFs).
+1. ✅ Created `exopoiesis/lab-corpus-mcp` repo (Phase 2A initial
+   skeleton, 2026-05-09; published to GitHub 2026-05-10).
+2. ✅ `pyproject.toml` declares `corpus-core>=0.1.0` and
+   `arxiv-radar-mcp>=0.0.1` as deps (Phase 3 final wiring).
+3. ✅ MinerU PDF ingest implemented (Phase 2B-1). Default backend
+   `pipeline` (Phase 2B+, 2026-05-10) — `vlm-transformers` wedges
+   on a 12 GB GPU when sharing VRAM with our embedding Qwen, so
+   we forward `-b pipeline` to the mineru CLI by default; users
+   with 24 GB+ headroom can override per-call. Marker bench still
+   open, but pipeline produced clean markdown + figures on
+   `2512.14129` in 86 sec, so the urgency is gone.
+4. ✅ Multi-source `paper_id` schema in `lab_corpus_mcp.corpus`:
+   filename arxiv-id pattern → sha256 prefix → `user_supplied`
+   override, with `paper_id_kind` distinguishing them.
+5. ✅ All shared infra (`JobRegistry`, `EmbeddingIndex`,
+   `mcp_scaffold`, search primitives, chunker) imported from
+   `corpus_core`. No glue duplication between siblings.
+6. ✅ Tool catalogue: 11 tools — `corpus_stats`, `list_corpus`,
+   `paper_info`, `job_status`, `job_list`, `ingest_pdf`,
+   `ingest_local_dir`, `rebuild_index`, `search_paper_text`,
+   `search_paper_semantic`, `similar_to_paper`. Each gains a
+   `backend` parameter where MinerU runs are involved.
+7. ✅ End-to-end verified on `arxiv:2512.14129` (Yin et al.,
+   (Cr,Fe)S pyrrhotite — the paper from arxiv-radar's U7
+   dogfood batch that triggered the whole effort): 86 sec parse,
+   16 chunks indexed, `search_paper_text("pyrrhotite")` returns
+   correct hits, `search_paper_semantic("ferrimagnetic
+   compensation temperature")` ranks Keywords > Header > Abstract
+   semantically. A second smoke (`arxiv:2511.18000`) confirmed
+   cross-paper search isolation.
 
-### Phase 3 — Extract `corpus_core` to its own repo — DONE 2026-05-09
+### Phase 3 — Extract `corpus_core` to its own repo — DONE 2026-05-09 → 10
 
 1. ✅ New repo `git/corpus-core/` (initial commit `d7e189b`).
-   PyPI publication deferred — for now downstream installs path-style
-   via `pip install -e ../corpus-core`.
+   Published as [exopoiesis/corpus-core](https://github.com/exopoiesis/corpus-core)
+   on 2026-05-10 (public). PyPI publication deferred — for now
+   downstream installs path-style via `pip install -e ../corpus-core`.
 2. ✅ Moved `src/corpus_core/` from arxiv-radar-mcp to corpus-core.
    Pre-extraction cleanup of dep-leaks (corpus_core was importing
    `arxiv_radar_mcp.config.RerankerConfig` and

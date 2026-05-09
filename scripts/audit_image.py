@@ -31,6 +31,17 @@ def _ok(label: str, value: str) -> None:
 def main() -> int:
     print("=== arxiv-radar-gpu audit ===")
 
+    # Python — must satisfy arxiv-radar-mcp's `requires-python>=3.11`
+    # AND stay strictly below MinerU's 3.14 upper bound (kept here for
+    # cross-image consistency with the lab-corpus-gpu sibling, even
+    # though this image has no MinerU).
+    py = sys.version_info
+    _ok("python.version:", f"{py.major}.{py.minor}.{py.micro}")
+    if py < (3, 11):
+        _fail(f"python {py.major}.{py.minor} < 3.11 (arxiv-radar-mcp requires-python)")
+    if py >= (3, 14):
+        _fail(f"python {py.major}.{py.minor} >= 3.14 (cross-image MinerU upper bound)")
+
     try:
         import torch
     except ImportError:
@@ -38,6 +49,17 @@ def main() -> int:
     _ok("torch.__version__:", torch.__version__)
     _ok("torch.__file__:", torch.__file__)
     _ok("torch.cuda.is_available():", str(torch.cuda.is_available()))
+
+    # Sync floor with the combined lab-corpus-gpu image: torch>=2.6 so
+    # the same Python env satisfies MinerU 3.x without forcing a
+    # parallel torch install. This image has no MinerU itself, but
+    # drifting below 2.6 here would mean Phase 3 sibling images
+    # disagree on torch.
+    parts = torch.__version__.split("+")[0].split(".")[:2]
+    torch_major, torch_minor = (int(x) for x in parts)
+    if (torch_major, torch_minor) < (2, 6):
+        _fail(f"torch {torch.__version__} < 2.6 (cross-image floor; "
+              f"the combined sibling pulls MinerU which needs >=2.6)")
 
     for name in ("sentence_transformers", "transformers"):
         try:

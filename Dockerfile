@@ -17,7 +17,14 @@
 #
 # For the COMBINED arxiv-radar + lab-corpus + MinerU bundle (one Qwen
 # in 12 GB VRAM), use lab-corpus-mcp/Dockerfile instead.
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+#
+# Base: torch 2.7.1 + CUDA 12.6 (Python 3.11). Bumped from 2.5.1 to
+# stay at-or-above MinerU 3.x's `torch>=2.6,<3` floor — that way we
+# don't pay for a separate ~800 MB pip-side torch reinstall when the
+# combined sibling adds MinerU. We deliberately don't pin torch in
+# our pyprojects: MinerU's transitive constraint already fences the
+# acceptable range, and adding a second pin would just create drift.
+FROM pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime
 
 LABEL org.opencontainers.image.title="arxiv-radar-gpu" \
       org.opencontainers.image.description="MCP server for arXiv abstract + fulltext semantic search" \

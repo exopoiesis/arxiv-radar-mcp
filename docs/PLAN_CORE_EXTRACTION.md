@@ -207,15 +207,37 @@ Name decided: `corpus-core` (PyPI distribution name) /
    `paper_info`, `job_status`, `job_list`.
 7. Test against a real lab-corpus mini-batch (10–20 PDFs).
 
-### Phase 3 — Extract `corpus_core` to its own repo (when both stabilise)
+### Phase 3 — Extract `corpus_core` to its own repo — DONE 2026-05-09
 
-1. New repo `exopoiesis/corpus_core`.
-2. Move `src/corpus_core/` from arxiv-radar-mcp to new repo.
-3. Add proper packaging (pyproject.toml, README, tests).
-4. Publish to PyPI.
-5. arxiv-radar-mcp + lab-corpus-mcp drop in-repo subpackage and depend
-   on PyPI'd `corpus_core` instead.
-6. Tag versions for compatibility tracking.
+1. ✅ New repo `git/corpus-core/` (initial commit `d7e189b`).
+   PyPI publication deferred — for now downstream installs path-style
+   via `pip install -e ../corpus-core`.
+2. ✅ Moved `src/corpus_core/` from arxiv-radar-mcp to corpus-core.
+   Pre-extraction cleanup of dep-leaks (corpus_core was importing
+   `arxiv_radar_mcp.config.RerankerConfig` and
+   `arxiv_radar_mcp.corpus.Paper` — both replaced with local
+   dataclass + Protocol declarations so the package is genuinely
+   standalone).
+3. ✅ Standalone packaging: pyproject.toml + LICENSE + README +
+   .gitignore + tests/ (97 tests, 57% coverage; pure-corpus_core
+   surface fully covered, the heavy reindex pipeline deferred to
+   host-project integration tests).
+4. ⏸ PyPI publication — verify name availability + tag v0.1.0
+   before shipping. Deferred to a focused publication session.
+5. ✅ arxiv-radar-mcp dropped `src/corpus_core/`; pyproject lists
+   `corpus-core>=0.1.0` as dependency. 230/230 tests still green.
+6. ✅ lab-corpus-mcp pyproject lists `corpus-core>=0.1.0` and the
+   Dockerfile installs all three siblings (`corpus-core`,
+   `arxiv-radar-mcp`, `lab-corpus-mcp`) editable in order. Tests
+   green. Dockerfile combined-mode builds + serves both backends
+   on one Qwen.
+7. ⏸ Tag versions for compatibility tracking — done after first
+   PyPI release.
+
+The "test_no_host_project_imports" smoke test in corpus-core/tests
+locks in the architectural invariant: corpus-core must never
+auto-import any host-project module. Any future regression turns
+red there before it reaches downstream.
 
 ## Naming decision (2026-05-09)
 

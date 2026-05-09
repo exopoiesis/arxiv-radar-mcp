@@ -60,17 +60,10 @@ class EmbeddingsConfig:
     target_dim: int | None = None
 
 
-@dataclass
-class RerankerConfig:
-    """Cross-encoder reranker applied on top of hybrid (text+semantic) results.
-
-    Cross-encoders score (query, passage) pairs jointly — costly per-pair
-    but dramatically more precise than bi-encoders. We pull `top_k_candidates`
-    from RRF, rerank, return the top-k requested by the caller.
-    """
-    enabled: bool = True
-    model: str = "BAAI/bge-reranker-base"
-    top_k_candidates: int = 50  # how many hybrid candidates feed into the cross-encoder
+# RerankerConfig now lives in corpus_core.reranker — re-exported here
+# so existing `from arxiv_radar_mcp.config import RerankerConfig` keeps
+# working for downstream code.
+from corpus_core.reranker import RerankerConfig  # noqa: E402, F401
 
 
 @dataclass

@@ -179,31 +179,10 @@ Completed phases moved to `docs/PLAN_ARCHIVE.md`. Still pending:
 
 ```
 src/
-├── corpus_core/         # SHARED INFRASTRUCTURE — phase-1 in-place extract
-│   │                    # for arxiv-radar-mcp + lab-corpus-mcp.
-│   │                    # See src/corpus_core/README.md and
-│   │                    # docs/PLAN_CORE_EXTRACTION.md.
-│   ├── __init__.py      # public API re-exports
-│   ├── README.md        # public API + invariants for downstream
-│   ├── embeddings.py    # Encoder (lazy bi-encoder + prefixes), EmbeddingIndex
-│   ├── reranker.py      # Reranker class (kept, not wired to tools — Р-010)
-│   ├── search.py        # search_text/semantic/similar_to (abstract-level)
-│   ├── chunker.py       # split markdown by ## headings; sub-split big sections
-│   ├── corpus_index.py  # was fulltext_index.py — chunk-level corpus search;
-│   │                    # reindex (incremental by default — Р-017);
-│   │                    # search_paper_text/semantic; similar_to_paper
-│   ├── jobs.py          # JobRegistry: ThreadPoolExecutor + persistent jobs/<id>.json;
-│   │                    # disk-truth fallback in get() for stale running state (U1)
-│   ├── proxy.py         # local stdio→remote-HTTP bridge with SSH tunnel;
-│   │                    # _bridge_loop reconnects on backend disconnect (U8 Option B)
-│   └── mcp_scaffold.py  # generic MCP server scaffold (Phase 1.5, 2026-05-09):
-│                        # make_method_dispatcher (handler + allowlist → dispatcher),
-│                        # build_mcp_app (server_name + tool_specs + dispatcher),
-│                        # serve_stdio / serve_streamable_http with optional
-│                        # background-task factories. Powers both the arxiv-radar
-│                        # shell here and the lab-corpus-mcp shell next door.
-│
-└── arxiv_radar_mcp/     # arxiv-radar-mcp shell (arxiv-specific only)
+└── arxiv_radar_mcp/     # arxiv-radar-mcp shell (arxiv-specific only).
+                         # corpus_core lives in its own repo since
+                         # Phase 3 (2026-05-09) — install via
+                         # `pip install -e ../corpus-core` for dev.
     ├── __main__.py      # `arxiv-radar-mcp` entrypoint (--build-cache, serve)
     ├── config.py        # radar.toml loader + defaults
     ├── corpus.py        # Paper dataclass, loaders for github + local sources

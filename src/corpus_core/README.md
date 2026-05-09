@@ -30,12 +30,17 @@ from corpus_core import (
     is_junk_section,
     JobRegistry, JobHandle, JobError, Job,
                                           # async background jobs
+    make_method_dispatcher,               # generic dispatcher builder
+    build_mcp_app,                        # mcp.server.Server constructor
+    serve_stdio, serve_streamable_http,   # transport entry points
+    Dispatcher, BackgroundTaskFactory,    # type aliases
 )
 
 # Submodule access also fine:
 from corpus_core.embeddings import Encoder
 from corpus_core.proxy import run_proxy   # stdio↔HTTP bridge
 from corpus_core.reranker import Reranker
+from corpus_core.mcp_scaffold import serve_streamable_http
 ```
 
 ## Module map
@@ -49,6 +54,7 @@ from corpus_core.reranker import Reranker
 | `jobs.py` | `JobRegistry` — ThreadPoolExecutor + persistent `jobs/<id>.json`. Disk-truth fallback in `get()` (U1 fix) |
 | `proxy.py` | Local stdio→remote-HTTP bridge with reconnect-loop (U8 Option B); `run_proxy(target, port, ssh_binary)` |
 | `reranker.py` | Cross-encoder reranker class. Kept as utility but no longer wired into any tool (РЕШЕНИЕ-010 in arxiv-radar-mcp). |
+| `mcp_scaffold.py` | Generic MCP server scaffold: `make_method_dispatcher` (handler+allowlist → dispatcher), `build_mcp_app` (server-name + tool-specs + dispatcher → `mcp.server.Server`), `serve_stdio` / `serve_streamable_http` transports, optional `BackgroundTaskFactory` list (warm-up, refresh, etc.). Phase 1.5 — extracted from `arxiv-radar-mcp/server.py` so `lab-corpus-mcp` can build its own MCP server on top of the same primitives without depending on the arxiv shell. |
 
 ## Invariants downstream projects must honour
 
@@ -79,8 +85,6 @@ from corpus_core.reranker import Reranker
 - `relevance_filter` + canonical tags loaders
   (project-specific)
 - TOOL_SPECS catalogue (each downstream owns its tool surface)
-- `_build_mcp_app` / `_run_stdio` / `_run_streamable_http` are still
-  inside `arxiv-radar-mcp/server.py`. Extract is planned (Phase 1.5).
 
 ## Tests
 
@@ -88,4 +92,6 @@ For now, the test suite under `arxiv-radar-mcp/tests/` doubles as
 `corpus-core` tests. When Phase 3 splits corpus-core to its own repo,
 relevant tests move with it (`test_jobs.py`, `test_embeddings.py`,
 `test_chunker.py`, `test_proxy.py`, `test_search_text.py`,
-`test_fulltext_index.py`, `test_reranker.py`).
+`test_fulltext_index.py`, `test_reranker.py`, plus the dispatcher /
+`_build_mcp_app` cases from `test_server.py` + `test_server_http.py`
+that exercise the scaffold via the arxiv-radar shell).

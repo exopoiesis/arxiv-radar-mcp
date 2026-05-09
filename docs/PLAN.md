@@ -194,8 +194,14 @@ src/
 │   │                    # search_paper_text/semantic; similar_to_paper
 │   ├── jobs.py          # JobRegistry: ThreadPoolExecutor + persistent jobs/<id>.json;
 │   │                    # disk-truth fallback in get() for stale running state (U1)
-│   └── proxy.py         # local stdio→remote-HTTP bridge with SSH tunnel;
-│                        # _bridge_loop reconnects on backend disconnect (U8 Option B)
+│   ├── proxy.py         # local stdio→remote-HTTP bridge with SSH tunnel;
+│   │                    # _bridge_loop reconnects on backend disconnect (U8 Option B)
+│   └── mcp_scaffold.py  # generic MCP server scaffold (Phase 1.5, 2026-05-09):
+│                        # make_method_dispatcher (handler + allowlist → dispatcher),
+│                        # build_mcp_app (server_name + tool_specs + dispatcher),
+│                        # serve_stdio / serve_streamable_http with optional
+│                        # background-task factories. Powers both the arxiv-radar
+│                        # shell here and the lab-corpus-mcp shell next door.
 │
 └── arxiv_radar_mcp/     # arxiv-radar-mcp shell (arxiv-specific only)
     ├── __main__.py      # `arxiv-radar-mcp` entrypoint (--build-cache, serve)

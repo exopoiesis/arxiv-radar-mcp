@@ -35,6 +35,13 @@ from corpus_core.corpus_index import (FULLTEXT_MAX_SEQ_LENGTH,
                                             search_paper_text,
                                             similar_to_paper)
 from corpus_core.jobs import JobError, JobHandle, JobRegistry
+from corpus_core.mcp_scaffold import (
+    BackgroundTaskFactory,
+    build_mcp_app,
+    make_method_dispatcher,
+    serve_stdio,
+    serve_streamable_http,
+)
 from arxiv_radar_mcp.refresh import refresh_sources
 from corpus_core.search import (search_semantic, search_text, similar_to)
 
@@ -777,44 +784,27 @@ TOOL_SPECS: list[dict[str, Any]] = [
 ]
 
 
+def _tool_names() -> list[str]:
+    return [spec["name"] for spec in TOOL_SPECS]
+
+
 def _dispatch(server: RadarServer, name: str, arguments: dict[str, Any] | None) -> Any:
     """Route an MCP tool-call to the matching RadarServer method.
 
-    Returns the method's return value, or an {"error": ...} dict for
-    unknown tools / bad arguments. Keeping this synchronous and pure makes
-    it trivial to unit-test without spinning up the SDK.
+    Thin wrapper over `corpus_core.mcp_scaffold.make_method_dispatcher`.
+    Kept under the `arxiv_radar_mcp.server` name because the test suite
+    imports it directly with stub `RadarServer`-shaped objects.
     """
-    method = getattr(server, name, None)
-    if method is None or name.startswith("_") or name not in {s["name"] for s in TOOL_SPECS}:
-        return {"error": f"unknown tool: {name!r}"}
-    try:
-        return method(**(arguments or {}))
-    except TypeError as e:
-        return {"error": f"bad arguments for {name}: {e}"}
+    return make_method_dispatcher(server, _tool_names())(name, arguments)
 
 
 def _build_mcp_app(radar: RadarServer):
-    """Construct an mcp.server.Server with our tool catalogue wired in.
-
-    Shared between stdio and HTTP transports — same dispatcher, same
-    TOOL_SPECS. Imported lazily so unit-tests don't need the MCP SDK.
-    """
-    from mcp.server import Server
-    from mcp.types import TextContent, Tool
-
-    app: Server = Server("arxiv-radar")
-
-    @app.list_tools()
-    async def _list_tools() -> list[Tool]:
-        return [Tool(**spec) for spec in TOOL_SPECS]
-
-    @app.call_tool()
-    async def _call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
-        result = _dispatch(radar, name, arguments)
-        text = json.dumps(result, indent=1, ensure_ascii=False, default=str)
-        return [TextContent(type="text", text=text)]
-
-    return app
+    """Construct the MCP app for `radar`, wired with our TOOL_SPECS."""
+    return build_mcp_app(
+        server_name="arxiv-radar",
+        tool_specs=TOOL_SPECS,
+        dispatcher=make_method_dispatcher(radar, _tool_names()),
+    )
 
 
 async def _warmup_encoder(radar: RadarServer) -> None:
@@ -895,75 +885,45 @@ def _blocking_refresh(radar: RadarServer, full_rebuild: bool) -> dict:
         radar.jobs.release_reindex_lock()
 
 
-async def _run_stdio(radar: RadarServer) -> None:
-    """Async stdio loop. Imported lazily so unit-tests don't need the SDK."""
-    from mcp.server.stdio import stdio_server
+def _arxiv_background_tasks(radar: RadarServer) -> list[BackgroundTaskFactory]:
+    """Background tasks the arxiv-radar shell wants alongside the MCP transport.
 
-    app = _build_mcp_app(radar)
-
-    refresh_task = None
+    Each entry is a zero-arg callable returning a fresh coroutine — the
+    `corpus_core.mcp_scaffold` contract. Re-running the server thus
+    produces fresh tasks instead of trying to await an already-finished
+    coroutine.
+    """
+    factories: list[BackgroundTaskFactory] = [lambda: _warmup_encoder(radar)]
     if radar.config.refresh.enabled:
-        refresh_task = asyncio.create_task(_refresh_loop(radar),
-                                           name="abstract-refresh")
-    warmup_task = asyncio.create_task(_warmup_encoder(radar),
-                                       name="encoder-warmup")
-    try:
-        async with stdio_server() as (read, write):
-            await app.run(read, write, app.create_initialization_options())
-    finally:
-        if refresh_task is not None:
-            refresh_task.cancel()
-        warmup_task.cancel()
+        factories.append(lambda: _refresh_loop(radar))
+    return factories
+
+
+async def _run_stdio(radar: RadarServer) -> None:
+    """Async stdio loop. Delegates transport to corpus_core.mcp_scaffold."""
+    await serve_stdio(
+        server_name="arxiv-radar",
+        tool_specs=TOOL_SPECS,
+        dispatcher=make_method_dispatcher(radar, _tool_names()),
+        background_tasks=_arxiv_background_tasks(radar),
+    )
 
 
 async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None:
     """Async streamable-HTTP loop. Long-running, holds RadarServer in memory.
 
-    The transport is the official MCP "streamable HTTP" (protocol
-    2025-03-26+). One backend process serves many clients; ideal for
-    running on a GPU host (gomer / Vast / etc.) with the heavy encoder
-    loaded once.
-
     Bind to 127.0.0.1 by default in production deployments — perimeter
     auth comes from an SSH tunnel, NOT from this server. See README for
     the deployment topology.
     """
-    import uvicorn
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-    from starlette.applications import Starlette
-    from starlette.routing import Mount
-
-    app = _build_mcp_app(radar)
-
-    session_manager = StreamableHTTPSessionManager(
-        app=app,
-        json_response=True,    # plain JSON-RPC over POST when client is happy
-        stateless=False,       # keep a session — enables long jobs polling
+    await serve_streamable_http(
+        server_name="arxiv-radar",
+        tool_specs=TOOL_SPECS,
+        dispatcher=make_method_dispatcher(radar, _tool_names()),
+        host=host,
+        port=port,
+        background_tasks=_arxiv_background_tasks(radar),
     )
-
-    async def _handle(scope, receive, send):
-        await session_manager.handle_request(scope, receive, send)
-
-    starlette_app = Starlette(routes=[Mount("/mcp", app=_handle)])
-
-    refresh_task = None
-    if radar.config.refresh.enabled:
-        refresh_task = asyncio.create_task(_refresh_loop(radar),
-                                           name="abstract-refresh")
-    warmup_task = asyncio.create_task(_warmup_encoder(radar),
-                                       name="encoder-warmup")
-
-    try:
-        async with session_manager.run():
-            config = uvicorn.Config(
-                starlette_app, host=host, port=port,
-                log_level="info", access_log=False,
-            )
-            await uvicorn.Server(config).serve()
-    finally:
-        if refresh_task is not None:
-            refresh_task.cancel()
-        warmup_task.cancel()
 
 
 def serve(config_path: Path | None = None) -> None:

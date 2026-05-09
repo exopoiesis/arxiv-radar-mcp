@@ -153,31 +153,43 @@ plugin between the two mcp servers.
 
 ## Phased rollout
 
-### Phase 1 — In-place extract (1 session in `arxiv-radar-mcp`)
+### Phase 1 — In-place extract (1 session in `arxiv-radar-mcp`) — DONE 2026-05-09
 
 Name decided: `corpus-core` (PyPI distribution name) /
 `corpus_core` (Python module). See "Naming decision" section.
 
-1. Create `src/corpus_core/` subpackage **inside current
+1. ✅ Create `src/corpus_core/` subpackage **inside current
    `arxiv-radar-mcp` repo** (Phase 1 lives here; Phase 3 extracts to a
-   separate repo).
-2. Move shared modules into `src/corpus_core/`:
-   - `embeddings.py`, `chunker.py`, `search.py`, `jobs.py`, `proxy.py`
+   separate repo). [commit cab7f3b]
+2. ✅ Move shared modules into `src/corpus_core/`:
+   - `embeddings.py`, `chunker.py`, `search.py`, `jobs.py`, `proxy.py`,
+     `reranker.py` [commit cab7f3b]
    - `fulltext_index.py` → `corpus_index.py` (rename: it indexes any
-     chunked corpus, not just arxiv fulltext)
-   - extract `mcp_scaffold.py` from current `server.py` (the
-     `_build_mcp_app`, `serve_stdio`, `serve_streamable_http`,
-     `_dispatch` machinery, parameterised over the per-server
-     `TOOL_SPECS` and dispatcher).
-3. Update `arxiv-radar-mcp` imports:
-   `from corpus_core import Encoder, EmbeddingIndex, JobRegistry, ...`
-4. Re-run the full test suite — no behaviour changes expected. Tests
-   double as `corpus_core` tests for the moment.
-5. Add a sub-README under `src/corpus_core/README.md` listing the
-   public API surface and the few invariants downstream packages must
-   honour (e.g. paper schema fields used by `_paper_payload`).
-6. Update top-level `arxiv-radar-mcp/docs/PLAN.md` code-map section to
-   reflect the new layout.
+     chunked corpus, not just arxiv fulltext) [commit cab7f3b]
+   - **Phase 1.5 (2026-05-09):** extract `mcp_scaffold.py` from current
+     `server.py` (the `_build_mcp_app`, `serve_stdio`,
+     `serve_streamable_http`, `_dispatch` machinery, parameterised
+     over per-server `server_name` + `tool_specs` + `dispatcher` +
+     optional `background_tasks`). Generic `make_method_dispatcher`
+     builds the dispatcher from any handler + tool-name allowlist.
+     `arxiv-radar-mcp/server.py` keeps thin wrappers `_dispatch` /
+     `_build_mcp_app` / `_run_stdio` / `_run_streamable_http` that
+     delegate to the scaffold (preserves test imports). The
+     arxiv-specific background tasks (`_warmup_encoder`, `_refresh_loop`)
+     stay in the radar shell and are passed in as factories.
+3. ✅ Update `arxiv-radar-mcp` imports:
+   `from corpus_core import Encoder, EmbeddingIndex, JobRegistry, ...`.
+   Phase 1.5 added `make_method_dispatcher`, `build_mcp_app`,
+   `serve_stdio`, `serve_streamable_http`.
+4. ✅ Re-run the full test suite — 230/230 green after Phase 1.5
+   (focused: 41/41 server + http + cli wiring). Tests double as
+   `corpus_core` tests for the moment.
+5. ✅ Sub-README at `src/corpus_core/README.md` lists the public API
+   surface and downstream invariants. Updated 2026-05-09 with the
+   `mcp_scaffold` module row + dropped the "still inside server.py"
+   caveat.
+6. ✅ Top-level `arxiv-radar-mcp/docs/PLAN.md` code-map reflects the
+   new layout (`corpus_core/` subpackage + arxiv shell).
 
 **Do NOT publish to PyPI yet.** Let the API stabilise through Phase 2.
 

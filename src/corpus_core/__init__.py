@@ -19,6 +19,9 @@ Public API surface (re-exports for convenience):
     load_chunk_texts, reindex, is_junk_section
                                             — corpus index lifecycle
     JobRegistry, JobHandle, JobError, Job   — async background jobs
+    make_method_dispatcher, build_mcp_app, serve_stdio,
+    serve_streamable_http, Dispatcher, BackgroundTaskFactory
+                                            — generic MCP server scaffold
 
 Submodule access (`from corpus_core.embeddings import ...`) is also
 fully supported — the explicit re-exports here are convenience only.
@@ -47,6 +50,14 @@ from corpus_core.jobs import (
     JobError,
     JobHandle,
     JobRegistry,
+)
+from corpus_core.mcp_scaffold import (
+    BackgroundTaskFactory,
+    Dispatcher,
+    build_mcp_app,
+    make_method_dispatcher,
+    serve_stdio,
+    serve_streamable_http,
 )
 from corpus_core.search import (
     search_semantic,
@@ -80,4 +91,11 @@ __all__ = [
     "JobError",
     "JobHandle",
     "JobRegistry",
+    # mcp scaffold
+    "BackgroundTaskFactory",
+    "Dispatcher",
+    "build_mcp_app",
+    "make_method_dispatcher",
+    "serve_stdio",
+    "serve_streamable_http",
 ]

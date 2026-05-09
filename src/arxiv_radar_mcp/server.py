@@ -55,10 +55,15 @@ class RadarServer:
     and `fulltext_index` (None until the user enriches papers and reindexes).
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, encoder: Encoder | None = None) -> None:
         self.config = config
         self.papers: dict[str, Paper] = load_all(config)
-        self.encoder = Encoder(config)  # lazy — loads model on first encode
+        # Encoder injection point: the combined-server supervisor (in
+        # lab-corpus-mcp/lab_corpus_mcp/combined.py) hands BOTH servers
+        # the same Encoder instance so a single Qwen3-4B copy fits in
+        # 12 GB VRAM. Plain single-server callers pass nothing and we
+        # construct one ourselves (lazy weight load on first encode).
+        self.encoder = encoder if encoder is not None else Encoder(config)
 
         self.abstract_index: EmbeddingIndex | None = None
         try:

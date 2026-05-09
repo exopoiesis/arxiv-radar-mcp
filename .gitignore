@@ -9,6 +9,8 @@ venv/
 *.egg-info/
 build/
 dist/
+.coverage
+htmlcov/
 
 # Embedding caches & model downloads (regenerable)
 .cache/

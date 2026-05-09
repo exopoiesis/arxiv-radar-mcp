@@ -7,6 +7,20 @@ Living design doc. Sibling to `arxiv-radar-*` data forks; this repo is
 > fixed UX issues U3/U6/U10) → `docs/PLAN_ARCHIVE.md`. This file holds only
 > what's still actionable.
 
+> **Phase 3 done (2026-05-09):** `corpus_core` extracted to its own repo
+> (see `docs/PLAN_CORE_EXTRACTION.md`). arxiv-radar-mcp now declares
+> `corpus-core>=0.1.0` as a regular dependency; the standalone
+> `arxiv-radar-gpu` Dockerfile uses parent build context to COPY the
+> sibling repo. Production deploy of 2026-05-09 → 10 promoted the
+> running `arxiv-radar-backend` container into the lab-corpus-mcp
+> combined image (`exopoiesis/lab-corpus-gpu`) — 34,627 abstract
+> embeddings + 466 fulltext chunks (51 papers) migrated from the
+> `arxiv-radar-cache` volume into `/srv/arxiv-radar/cache/`. Single
+> Qwen3-4B in VRAM shared between both backends; refresh loop runs
+> nightly with `full_rebuild=false` so existing embeddings are
+> preserved. See `lab-corpus-mcp/docs/DEPLOY.md` for the migration
+> recipe and current operational layout.
+
 ---
 
 ## [РЕШЕНИЕ-018] arXiv rate-limit + retry on 429/503 (applied 2026-05-08)

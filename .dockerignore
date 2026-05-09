@@ -1,18 +1,32 @@
-.venv/
-.git/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-htmlcov/
-*.egg-info/
-build/
-dist/
-node_modules/
-.coverage
-tmp/
-docs/
-tests/
+# Build context is the PARENT directory (containing corpus-core/ and
+# arxiv-radar-mcp/) — entries below apply at that root level so each
+# sibling's junk is stripped from the upload to gomer.
+
+**/.venv/
+**/.cache/
+**/.git/
+**/.github/
+**/.claude/
+**/tmp/
+**/docs/
+**/tests/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/htmlcov/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*.egg-info/
+**/build/
+**/dist/
+**/.coverage
+**/*.log
+**/*.swp
+**/.DS_Store
+**/Thumbs.db
+
+# Sibling repos that this Dockerfile doesn't COPY (lab-corpus-mcp lives
+# next door but is built by its own Dockerfile).
+lab-corpus-mcp/

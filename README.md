@@ -133,7 +133,10 @@ Per arxiv_id, in order, stop at first success:
 
 Why no PDF: `mineru[core]` adds ~2 GB of dependency to cover ~10-15%
 remaining tail. Trade-off didn't make sense for this server's scope.
-See [`docs/PLAN.md`](docs/PLAN.md) `[РЕШЕНИЕ-013]`.
+See [`docs/PLAN.md`](docs/PLAN.md) `[РЕШЕНИЕ-013]`. For PDF-only
+arxiv papers, use the sibling [lab-corpus-mcp](https://github.com/exopoiesis/lab-corpus-mcp)
+server's `ingest_arxiv_pdf(arxiv_id)` tool — it shares the same
+arxiv 1 req / 3 sec throttle via `corpus_core.http_fetch` (U14, 2026-05-13).
 
 Empirical reference (HTML+LaTeX vs PDF text quality on arXiv corpus):
 HTML+LaTeX combined F1 = 0.69 vs text-from-PDF much lower

@@ -118,16 +118,26 @@ severity.
 | # | Title | Severity | Where | Fix size | Notes |
 |---|-------|:---:|---|:---:|---|
 | U4 | **Domain feed coverage gap for our use case (Fe-S sulfide chemistry)** | HIGH (project-specific) | `radar.toml` source feed selection upstream in `arxiv-radar-*` forks | external repo | Searched for known important authors/keywords: `Sundararaman` 0 hits, `Marx` 0 hits, `Roldan iron sulfide` 0 hits, `mackinawite` 0 hits, `Beyazay` 0 hits, `Muchowska` 0 hits. All these have arXiv preprints — they just aren't in the `arxiv-radar-*` filter results. Specifically: `mackinawite` is a centerpiece mineral of the Third Matter project but doesn't show up at all. **Two complementary fixes (in the *fork* not this server):** (a) keyword-trigger inclusion: any paper whose abstract contains a curated mineral term (mackinawite/pentlandite/greigite/pyrrhotite/troilite/chalcopyrite) auto-enters `sulfide_materials`; (b) author-whitelist feed: a small list of high-signal authors (Sundararaman, Marx, Roldan, Santos-Carballal, Behler, Csányi, Reuter, Andreussi) gets every preprint pulled regardless of category match. |
+| U15 | **No federated search across arxiv-radar HTML index + lab-corpus PDF index** | MEDIUM (UX) | new `corpus-core/federated_search.py` (or thin shim in both servers) | ~40 LOC + tests | **Surfaced 2026-05-10 (s142 dogfood).** After U7 split, the same paper concept lives in two indexes: HTML/LaTeX papers in `/srv/arxiv-radar/cache/` (50 papers indexed currently), PDF-only papers in `/srv/lab-corpus/parsed/` (13 papers indexed in s142). User asks "find me a paper about CANDLE solvation" → must call `arxiv-radar.search_paper_semantic` AND `lab-corpus.search_paper_semantic` and merge results manually. **Fix:** federated tool `search_paper_semantic_all` that calls both backends with the same query, merges by score, dedups by `arxiv_id`, returns top-k. Lives in `corpus-core` since both servers already share infra. **Now the top outstanding UX item after U14 RESOLVED 2026-05-13.** |
 
-> **U7 RESOLVED (2026-05-09 → 10):** PDF-only papers handled by the
-> sibling [`lab-corpus-mcp`](https://github.com/exopoiesis/lab-corpus-mcp)
-> server's `ingest_pdf` / `ingest_local_dir` tools (MinerU `pipeline`
-> backend, ~90 sec per 2 MB PDF on RTX 4070). End-to-end verified on
-> `2512.14129` (Yin et al., (Cr,Fe)S pyrrhotite) — the exact paper
-> from the dogfood batch that triggered this issue. arxiv-radar-mcp
-> stays focused on HTML/LaTeX cascade; PDF-only IDs go to the lab
-> sibling. Cross-image VRAM footprint solved by `lab_corpus_mcp.combined`
-> running both servers in one process with one shared Qwen Encoder.
+> **U7 RESOLVED (2026-05-09 → 10), U14 RESOLVED (2026-05-13):** PDF-only papers are
+> handled by the sibling [`lab-corpus-mcp`](https://github.com/exopoiesis/lab-corpus-mcp)
+> server's `ingest_pdf` / `ingest_local_dir` / `ingest_url` /
+> `ingest_arxiv_pdf` tools (MinerU `pipeline` backend, ~90 sec per
+> 2 MB PDF on RTX 4070). U14 closure adds **`ingest_arxiv_pdf(arxiv_id)`**
+> and **`ingest_url(url, paper_id?)`** that download server-side
+> via `corpus_core.fetch_url` (shared arXiv 1 req / 3 sec throttle
+> with arxiv-radar's HTML/LaTeX fetcher when combined image runs
+> both backends in one process). No more curl + docker cp +
+> ingest_local_dir for fresh PDFs. End-to-end verified on
+> `2512.14129` (Yin et al., (Cr,Fe)S pyrrhotite) — the original
+> dogfood paper. arxiv-radar-mcp stays focused on HTML/LaTeX
+> cascade; PDF-only IDs go to the lab sibling. Cross-image VRAM
+> footprint solved by `lab_corpus_mcp.combined` running both
+> servers in one process with one shared Qwen Encoder. See
+> `lab-corpus-mcp/docs/DEPLOY.md` for the tool surface and
+> `lab-corpus-mcp/src/lab_corpus_mcp/ingest.py:fetch_and_ingest`
+> for the implementation.
 
 ---
 

@@ -142,6 +142,7 @@ plugin between the two mcp servers.
 | Author whitelist with `via:author-whitelist:<note>` topic | `corpus-core/whitelist.py` | both (with per-repo `tags/authors.yaml`) |
 | Bare-word query disambiguation pattern (RAW: + AND-context) | `corpus-core` doc | both (architectural guidance) |
 | ENVIRON-style probe pattern | `corpus-core/probe.py` (testing helper) | both |
+| **U14 fetch-by-URL** (2026-05-13): `fetch_url` / `fetch_arxiv_pdf` + arxiv `Throttle` singleton | `corpus-core/http_fetch.py` | both — arxiv-radar's `_fetch_html` / `_fetch_eprint` and lab-corpus's `fetch_and_ingest` (powers `ingest_url` / `ingest_arxiv_pdf`) all share one process-wide arXiv 1 req / 3 sec budget |
 | U2 `validate_arxiv_ids` | `arxiv-radar-mcp/fulltext.py` | arxiv only (HEAD probe to arxiv.org) |
 | U9 `fetch_papers force=True` | `arxiv-radar-mcp/server.py` | arxiv only |
 | U10 echo-skeleton detector | `arxiv-radar-mcp/fulltext.py` | arxiv only (LaTeXML quirk) |

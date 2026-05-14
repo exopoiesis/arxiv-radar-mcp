@@ -29,13 +29,17 @@ import json
 import logging
 import re
 import tarfile
-import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+
+from corpus_core.http_fetch import (
+    ARXIV_RATE_LIMIT_S,
+    get_arxiv_throttle,
+    request_with_retry,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -44,24 +48,17 @@ _EPRINT_URL = "https://arxiv.org/e-print/{id}"
 _USER_AGENT = "arxiv-radar-mcp/0.1 (+https://github.com/exopoiesis/arxiv-radar-mcp)"
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
-# arXiv ToS / robots.txt: no more than 1 outbound request / 3 seconds.
-# Module-global so HTML→LaTeX fallback within one paper AND consecutive
-# papers in a batch all share the rate limit. Thread-safe (jobs.py runs
-# fetch_papers on a worker thread).
-_RATE_LIMIT_S = 3.0
-_last_request_at = 0.0
-_rate_lock = threading.Lock()
+
+# Backwards-compatible aliases. Throttle state and retry logic live in
+# `corpus_core.http_fetch` so the arxiv-radar fetcher and the lab-corpus
+# `ingest_arxiv_pdf` tool share **one** module-global rate limiter when
+# they run together in the combined image.
+_RATE_LIMIT_S = ARXIV_RATE_LIMIT_S
 
 
 def _throttle() -> None:
     """Block until the next arxiv.org GET respects the rate limit."""
-    global _last_request_at
-    with _rate_lock:
-        now = time.monotonic()
-        wait = _RATE_LIMIT_S - (now - _last_request_at)
-        if wait > 0:
-            time.sleep(wait)
-        _last_request_at = time.monotonic()
+    get_arxiv_throttle().wait()
 
 
 def _request_with_retry(
@@ -69,32 +66,15 @@ def _request_with_retry(
 ) -> httpx.Response:
     """GET with arXiv rate-limit + exponential backoff on 429/503.
 
-    Honours `Retry-After` if present. Returns the final response (caller
-    decides what to do with non-200). Retries only on transient throttle
-    codes; 404/410/etc fall through unchanged.
+    Thin wrapper over ``corpus_core.http_fetch.request_with_retry`` that
+    pins the arXiv throttle and the legacy backoff seed (``_RATE_LIMIT_S``).
     """
-    backoff = _RATE_LIMIT_S
-    r: httpx.Response | None = None
-    for attempt in range(1, max_attempts + 1):
-        _throttle()
-        r = client.get(url)
-        if r.status_code not in (429, 503):
-            return r
-        if attempt == max_attempts:
-            return r
-        retry_after = r.headers.get("Retry-After")
-        try:
-            wait = float(retry_after) if retry_after else backoff
-        except (TypeError, ValueError):
-            wait = backoff
-        LOG.warning(
-            f"arxiv {r.status_code} on {url}; retry in {wait:.1f}s "
-            f"(attempt {attempt}/{max_attempts})"
-        )
-        time.sleep(wait)
-        backoff *= 2
-    assert r is not None  # loop body always assigns
-    return r
+    return request_with_retry(
+        client, url,
+        throttle=get_arxiv_throttle(),
+        max_attempts=max_attempts,
+        backoff_seed_s=_RATE_LIMIT_S,
+    )
 
 
 @dataclass

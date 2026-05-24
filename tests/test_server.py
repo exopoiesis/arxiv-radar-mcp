@@ -426,3 +426,101 @@ def test_validate_arxiv_ids_empty_list_errors(local_config):
         assert "error" in out
     finally:
         radar.jobs.shutdown()
+
+
+# ----- VRAM release after refresh / reindex / bootstrap ---------------------
+
+def test_release_encoder_vram_proxies_to_encoder_unload(local_config):
+    radar = RadarServer(local_config)
+    try:
+        calls = {"n": 0}
+
+        def _fake_unload():
+            calls["n"] += 1
+            return True
+
+        radar.encoder.unload = _fake_unload  # type: ignore[method-assign]
+        radar._release_encoder_vram()
+        assert calls["n"] == 1
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_release_encoder_vram_swallows_exceptions(local_config, caplog):
+    radar = RadarServer(local_config)
+    try:
+        def _boom():
+            raise RuntimeError("simulated cuda issue")
+        radar.encoder.unload = _boom  # type: ignore[method-assign]
+        with caplog.at_level("WARNING"):
+            radar._release_encoder_vram()  # must not raise
+        assert any("encoder.unload() failed" in rec.message
+                   for rec in caplog.records)
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_blocking_refresh_releases_vram_on_success(monkeypatch, local_config):
+    """Bootstrap + nightly tick path: _blocking_refresh must call unload
+    after refresh_sources returns, regardless of refresh outcome."""
+    from arxiv_radar_mcp.server import _blocking_refresh
+
+    radar = RadarServer(local_config)
+    try:
+        calls = {"n": 0}
+        radar.encoder.unload = lambda: (  # type: ignore[method-assign]
+            calls.__setitem__("n", calls["n"] + 1) or True)
+        monkeypatch.setattr(
+            "arxiv_radar_mcp.server.refresh_sources",
+            lambda r, full_rebuild=False: {"strategy": "noop", "total": 0,
+                                            "added": 0, "deleted": 0},
+        )
+        result = _blocking_refresh(radar, full_rebuild=True)
+        assert result["strategy"] == "noop"
+        assert calls["n"] == 1, "unload must fire after successful refresh"
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_blocking_refresh_releases_vram_on_failure(monkeypatch, local_config):
+    """Even if refresh_sources blows up, the finally must release VRAM."""
+    from arxiv_radar_mcp.server import _blocking_refresh
+
+    radar = RadarServer(local_config)
+    try:
+        calls = {"n": 0}
+        radar.encoder.unload = lambda: (  # type: ignore[method-assign]
+            calls.__setitem__("n", calls["n"] + 1) or True)
+
+        def _boom(r, full_rebuild=False):
+            raise RuntimeError("simulated refresh failure")
+        monkeypatch.setattr("arxiv_radar_mcp.server.refresh_sources", _boom)
+
+        with pytest.raises(RuntimeError, match="simulated refresh failure"):
+            _blocking_refresh(radar, full_rebuild=True)
+        assert calls["n"] == 1, "unload must fire even on refresh failure"
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_blocking_refresh_skipped_when_lock_held(local_config):
+    """If the reindex lock is already taken, _blocking_refresh returns
+    skipped immediately — no encoder load, no unload needed."""
+    from arxiv_radar_mcp.server import _blocking_refresh
+
+    radar = RadarServer(local_config)
+    try:
+        # Steal the lock.
+        assert radar.jobs.acquire_reindex_lock()
+        try:
+            calls = {"n": 0}
+            radar.encoder.unload = lambda: (  # type: ignore[method-assign]
+                calls.__setitem__("n", calls["n"] + 1) or True)
+            result = _blocking_refresh(radar, full_rebuild=False)
+            assert result == {"skipped": "encoder busy"}
+            # Lock-busy path returns BEFORE acquiring → no unload fire.
+            assert calls["n"] == 0
+        finally:
+            radar.jobs.release_reindex_lock()
+    finally:
+        radar.jobs.shutdown()

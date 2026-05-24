@@ -1,6 +1,6 @@
 [project]
 name = "arxiv-radar-mcp"
-version = "0.0.2"
+version = "0.0.3"
 description = "MCP server for semantic + text search across the daily-arxiv-* fork family."
 readme = "README.md"
 requires-python = ">=3.11"

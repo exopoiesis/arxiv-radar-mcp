@@ -899,13 +899,22 @@ def _should_refresh_at_boot(radar: RadarServer) -> bool:
 
 def _blocking_refresh(radar: RadarServer, full_rebuild: bool) -> dict:
     """Synchronous refresh under the encoder lock. Called via asyncio.to_thread
-    from the refresh loop so the event loop stays responsive."""
+    from the refresh loop (bootstrap + nightly tick) so the event loop stays
+    responsive.
+
+    s153 fix: ALSO releases the encoder VRAM after the refresh completes —
+    mirrors the unload path added to `_do_refresh` (the MCP-tool entry point).
+    Without this, a 35k-abstract bootstrap that lands at server start pins
+    ~8-12 GB of Qwen3-4B in VRAM for the rest of the server's lifetime,
+    blocking unrelated GPU compute on the shared host (s153 prod incident).
+    """
     if not radar.jobs.acquire_reindex_lock():
         return {"skipped": "encoder busy"}
     try:
         return refresh_sources(radar, full_rebuild=full_rebuild)
     finally:
         radar.jobs.release_reindex_lock()
+        radar._release_encoder_vram()
 
 
 def _arxiv_background_tasks(radar: RadarServer) -> list[BackgroundTaskFactory]:

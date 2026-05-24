@@ -399,6 +399,21 @@ class RadarServer:
             "source_breakdown": dict(source_counts),
         }
 
+    def _release_encoder_vram(self) -> None:
+        """Drop the bi-encoder from VRAM after a heavy one-shot job.
+
+        Refresh / reindex pin Qwen3-Embedding-4B (~7-8 GB in bf16) for
+        the server lifetime once warmed. On a host that also runs DFT /
+        MLIP workloads on the same GPU, calling `unload()` after each
+        completed job frees that VRAM; the next search query lazily
+        re-loads (≈20 sec on RTX 4070). `unload()` is idempotent so it
+        is safe to call from every job-completion path.
+        """
+        try:
+            self.encoder.unload()
+        except Exception as e:  # noqa: BLE001
+            LOG.warning(f"encoder.unload() failed (will keep model resident): {e}")
+
     def _do_refresh(self, handle: JobHandle, *, full_rebuild: bool) -> dict:
         try:
             result = refresh_sources(self, full_rebuild=full_rebuild)
@@ -407,6 +422,8 @@ class RadarServer:
             raise JobError(f"refresh failed: {type(e).__name__}: {e}") from e
         else:
             self.jobs.release_reindex_lock()
+        finally:
+            self._release_encoder_vram()
         return result
 
     def _do_reindex(self, handle: JobHandle, *, force_full: bool = False) -> dict:
@@ -422,6 +439,7 @@ class RadarServer:
             raise JobError(str(e)) from e
         finally:
             self.jobs.release_reindex_lock()
+            self._release_encoder_vram()
 
         # Atomic swap into the live server.
         self.fulltext_index = new_index

@@ -412,6 +412,24 @@ Named volumes used by the backend:
 - `arxiv-radar-cache` → `/cache` (radar.toml + abstracts/ + fulltext/ + jobs/)
 - `arxiv-radar-hf` → `/root/.cache/huggingface` (Qwen3-4B weights)
 
+## GPU memory release (v0.0.2, 2026-05-24)
+
+After every `reindex` or `refresh_abstracts` job completes (success or
+failure), the server calls `Encoder.unload()` from corpus-core ≥ 0.2.0,
+which drops the in-process Qwen3-Embedding-4B (~7-8 GB bf16) and calls
+`torch.cuda.empty_cache()`. The next search query lazily re-loads the
+model (≈20 sec cold on RTX 4070).
+
+This matters when the GPU host runs unrelated compute (DFT / MLIP /
+training) between batches — without unload, the encoder pins VRAM for
+the entire server lifetime even when idle. The trade-off is the
+cold-load cost on the first query after each batch; if you query more
+than you reindex, factor that in.
+
+The combined-mode supervisor in lab-corpus-mcp wires the same release
+path through `_LockedEncoder` so unload from either backend frees the
+shared Qwen instance.
+
 ### Choice between A and B
 
 | | Local (A) | Remote SSH (B) |

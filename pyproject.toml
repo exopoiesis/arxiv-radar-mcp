@@ -1,6 +1,6 @@
 [project]
 name = "arxiv-radar-mcp"
-version = "0.0.1"
+version = "0.0.2"
 description = "MCP server for semantic + text search across the daily-arxiv-* fork family."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,7 +25,7 @@ dependencies = [
     # own repo at exopoiesis/corpus-core; install it from there until
     # PyPI publication. For dev: `pip install -e ../corpus-core`
     # before `pip install -e .`.
-    "corpus-core>=0.1.0",
+    "corpus-core>=0.2.0",
     "mcp>=1.0",
     "sentence-transformers>=3.0",
     "numpy>=1.26",

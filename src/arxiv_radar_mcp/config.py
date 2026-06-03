@@ -58,6 +58,11 @@ class EmbeddingsConfig:
     cache_dir: Path = field(default_factory=lambda: _default_cache_dir() / "embeddings")
     batch_size: int = 64
     target_dim: int | None = None
+    # Drop the bi-encoder from VRAM after this many idle seconds (no encode).
+    # See corpus_core.embeddings.Encoder._touch_idle. 0 disables. The arxiv
+    # encoder (mxbai, ~0.3 GB) is far lighter than lab-corpus's Qwen3-4B, but
+    # the shared Encoder honors this uniformly.
+    idle_unload_s: int = 600
 
 
 # RerankerConfig now lives in corpus_core.reranker — re-exported here
@@ -198,6 +203,7 @@ def _from_dict(data: dict) -> Config:
                   else emb_defaults.cache_dir,
         batch_size=emb_raw.get("batch_size", emb_defaults.batch_size),
         target_dim=emb_raw.get("target_dim", emb_defaults.target_dim),
+        idle_unload_s=emb_raw.get("idle_unload_s", emb_defaults.idle_unload_s),
     )
 
     rer_raw = data.get("reranker", {})

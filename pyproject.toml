@@ -21,11 +21,8 @@ classifiers = [
 dependencies = [
     # Core shared infrastructure (Encoder, EmbeddingIndex, JobRegistry,
     # mcp_scaffold, search primitives, chunker, corpus_index, proxy,
-    # reranker). Phase 3 extracted this from src/corpus_core/ into its
-    # own repo at exopoiesis/corpus-core; install it from there until
-    # PyPI publication. For dev: `pip install -e ../corpus-core`
-    # before `pip install -e .`.
-    "corpus-core>=0.2.0",
+    # reranker). Published on PyPI as corpus-core; for dev: `pip install -e ../corpus-core`.
+    "corpus-core>=0.1.0",
     "mcp>=1.0",
     "sentence-transformers>=3.0",
     "numpy>=1.26",

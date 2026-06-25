@@ -12,9 +12,8 @@ Covers:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -92,7 +91,6 @@ def test_github_headers_trims_whitespace(monkeypatch):
 
 def test_list_shards_via_api_sends_auth_header(monkeypatch):
     """When GITHUB_TOKEN is set, the GET to the API includes Authorization."""
-    import httpx
 
     captured_headers: dict = {}
 
@@ -275,7 +273,7 @@ def test_fetch_and_save_writes_parse_quality(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(ft_mod, "_download_images", lambda imgs, dest, client: [])
 
     fulltext_dir = tmp_path / "fulltext"
-    result = fetch_and_save("2601.99999", fulltext_dir)
+    fetch_and_save("2601.99999", fulltext_dir)
 
     meta_path = fulltext_dir / "sources" / "2601.99999.meta.json"
     assert meta_path.exists()

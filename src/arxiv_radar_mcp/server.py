@@ -969,7 +969,6 @@ async def _refresh_loop(radar: RadarServer) -> None:
     do one refresh immediately (full rebuild) so the server has data.
     Then sleep `interval_hours`, refresh, repeat.
     """
-    import time
 
     interval_seconds = radar.config.refresh.interval_hours * 3600
     full = radar.config.refresh.full_rebuild

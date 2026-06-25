@@ -12,9 +12,8 @@ import tarfile
 from pathlib import Path
 
 import httpx
-import pytest
 
-from arxiv_radar_mcp.fulltext import (FetchResult, fetch_and_save, fetch_paper,
+from arxiv_radar_mcp.fulltext import (fetch_and_save, fetch_paper,
                                       probe_html_available,
                                       _add_markdown_headings, _expand_inputs,
                                       _extract_main_tex, _pick_main_tex)

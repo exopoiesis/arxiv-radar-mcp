@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from arxiv_radar_mcp.config import Config, load
+from arxiv_radar_mcp.config import load
 
 
 @pytest.fixture

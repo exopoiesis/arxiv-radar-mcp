@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from arxiv_radar_mcp import refresh as refresh_mod
 from arxiv_radar_mcp.refresh import (_atomic_save, git_pull, is_git_repo,

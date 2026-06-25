@@ -18,13 +18,11 @@ import types
 import zipfile
 from pathlib import Path
 
-import pytest
 
 from arxiv_radar_mcp.fulltext import (
     FetchResult,
     _fetch_pdf,
     fetch_and_save,
-    paper_files,
     rewrite_image_refs,
 )
 

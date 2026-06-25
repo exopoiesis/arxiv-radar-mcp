@@ -126,7 +126,8 @@ def test_search_paper_semantic_snippet_chars_extends_default():
     long_text = "X " * 500   # 1000 chars
     rows = [("p1", "Methods", long_text)]
     index = _make_chunk_index(rows)
-    qvec = np.zeros(index.dims, dtype=np.float32); qvec[0] = 1.0
+    qvec = np.zeros(index.dims, dtype=np.float32)
+    qvec[0] = 1.0
 
     short = search_paper_semantic(index, [long_text], qvec, snippet_chars=240)
     long  = search_paper_semantic(index, [long_text], qvec, snippet_chars=600)
@@ -468,7 +469,9 @@ def test_search_paper_semantic_falls_back_to_junk_when_short():
         {"arxiv_id": "p3", "section": "Methods", "chunk_idx": 0, "n_chars": 100},
     ]
     matrix = np.zeros((3, 4), dtype=np.float32)
-    matrix[0, 0] = 1.0; matrix[1, 0] = 0.99; matrix[2, 0] = 0.98
+    matrix[0, 0] = 1.0
+    matrix[1, 0] = 0.99
+    matrix[2, 0] = 0.98
     index = EmbeddingIndex(
         matrix=matrix,
         row_for={c["arxiv_id"]: i for i, c in enumerate(chunks)},
@@ -476,7 +479,8 @@ def test_search_paper_semantic_falls_back_to_junk_when_short():
         dims=4,
         metadata={"chunks": chunks, "max_seq_length": 12_000, "n_papers": 3},
     )
-    qvec = np.zeros(4, dtype=np.float32); qvec[0] = 1.0
+    qvec = np.zeros(4, dtype=np.float32)
+    qvec[0] = 1.0
 
     out = search_paper_semantic(index, None, qvec, k=5)
     # 3 results total: one clean (Methods) first, then junk.

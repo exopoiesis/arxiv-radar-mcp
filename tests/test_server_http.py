@@ -7,9 +7,7 @@ constructed with the full tool catalogue intact.
 """
 from __future__ import annotations
 
-import asyncio
 
-import pytest
 
 
 def test_build_mcp_app_uses_tool_specs(local_config):

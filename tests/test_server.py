@@ -554,7 +554,6 @@ def test_warn_if_shared_gpu_risk_no_warning_when_encoder_injected(
 def test_warn_if_shared_gpu_risk_no_crash_when_cuda_unavailable(caplog):
     """_warn_if_shared_gpu_risk never raises even when torch says CUDA is
     unavailable (CPU-only host). Uses monkeypatching, no real GPU needed."""
-    import arxiv_radar_mcp.server as srv_mod
 
     # Simulate no CUDA: patch torch.cuda.is_available to return False.
     class _FakeCuda:
@@ -584,7 +583,6 @@ def test_warn_if_shared_gpu_risk_emits_warning_when_vram_busy(caplog):
     """_warn_if_shared_gpu_risk logs a WARNING referencing DECISIONS-136 when
     CUDA is available and used VRAM exceeds the 2 GB threshold."""
     import sys
-    import arxiv_radar_mcp.server as srv_mod
 
     # Simulate 8 GB used out of 12 GB total (typical Qwen3-4B load).
     _TOTAL = 12 * 1024 * 1024 * 1024

@@ -381,3 +381,190 @@ def test_probe_html_available_handles_network_error():
         ok = probe_html_available("2503.12345", client=client)
 
     assert ok is False
+
+
+# ----- figure images (HTML ingest) ------------------------------------------
+
+
+# arxiv renders figures as <figure><img src="<ver>/xN.png"><figcaption>...
+# Mirror that markup (with two figures + a real caption) so we exercise the
+# src→absolute-url resolution and the markdown ref emission.
+_FAKE_HTML_WITH_FIG = """<!DOCTYPE html>
+<html><head><title>Fig paper</title></head><body>
+<article>
+<h1 class="ltx_title ltx_title_document">A paper with figures</h1>
+<div class="ltx_abstract">
+  <h6 class="ltx_title ltx_title_abstract">Abstract</h6>
+  <p>We present figures and verify that the ingest pipeline downloads the
+  referenced images and rewrites them into local markdown refs without
+  tripping the echo-skeleton heuristic on this fixture body.</p>
+</div>
+<section class="ltx_section">
+  <h2 class="ltx_title ltx_title_section">Results</h2>
+  <p>The results section is long enough to be treated as real content and
+  not an echo skeleton; it discusses the figures shown just below here.</p>
+  <figure id="S1.F1" class="ltx_figure">
+    <img src="2503.99999/x1.png" class="ltx_graphics" alt="Refer to caption">
+    <figcaption><span class="ltx_tag">Figure 1: </span>The first figure caption.</figcaption>
+  </figure>
+  <figure id="S1.F2" class="ltx_figure">
+    <img src="2503.99999/x2.png" class="ltx_graphics" alt="Refer to caption">
+    <figcaption><span class="ltx_tag">Figure 2: </span>The second figure caption.</figcaption>
+  </figure>
+</section>
+</article>
+</body></html>
+"""
+
+_FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"fake-image-bytes" * 4
+
+
+def _fig_handler(request, *, img_status: int = 200):
+    """MockTransport handler: serve the figure HTML + PNG bytes for images."""
+    url = str(request.url)
+    if url.endswith(".png"):
+        return httpx.Response(img_status, content=_FAKE_PNG if img_status == 200 else b"")
+    if "/html/" in url:
+        return httpx.Response(200, text=_FAKE_HTML_WITH_FIG)
+    return httpx.Response(404)
+
+
+def test_safe_image_name():
+    from arxiv_radar_mcp.fulltext import _safe_image_name
+    assert _safe_image_name("2603.05238v2/x1.png") == "x1.png"
+    assert _safe_image_name("extracted/3/fig%201.png?v=2") == "fig_201.png"
+    assert _safe_image_name("../../etc/passwd") == "passwd"  # no traversal
+    assert _safe_image_name("") == "figure.png"             # fallback
+
+
+def test_fetch_paper_records_image_manifest():
+    """HTML <img> tags become {name,url} entries with absolute URLs, and the
+    markdown carries `![](<id>.media/<name>)` refs to them."""
+    with _client_with_handler(_fig_handler) as client:
+        result = fetch_paper("2503.99999", client=client)
+
+    assert result.source == "html"
+    names = sorted(im["name"] for im in result.images)
+    assert names == ["x1.png", "x2.png"]
+    # src resolved against the page URL into an absolute arxiv URL.
+    assert all(im["url"].startswith("https://arxiv.org/html/") for im in result.images)
+    # Markdown points at the local media dir; captions survive too.
+    assert "![](2503.99999.media/x1.png)" in result.markdown
+    assert "![](2503.99999.media/x2.png)" in result.markdown
+    assert "The first figure caption." in result.markdown
+
+
+def test_fetch_and_save_downloads_images_and_records_meta(tmp_path: Path):
+    with _client_with_handler(_fig_handler) as client:
+        result = fetch_and_save("2503.99999", tmp_path, client=client)
+
+    media_dir = tmp_path / "sources" / "2503.99999.media"
+    assert (media_dir / "x1.png").read_bytes() == _FAKE_PNG
+    assert (media_dir / "x2.png").read_bytes() == _FAKE_PNG
+
+    meta = json.loads((tmp_path / "sources" / "2503.99999.meta.json")
+                      .read_text(encoding="utf-8"))
+    assert len(meta["images"]) == 2
+    assert {im["name"] for im in meta["images"]} == {"x1.png", "x2.png"}
+    assert all(im["n_bytes"] == len(_FAKE_PNG) for im in meta["images"])
+    assert len(result.images) == 2
+
+
+def test_fetch_and_save_image_download_failure_is_non_fatal(tmp_path: Path):
+    """A 404 on a figure must not fail the paper — md still saved, image skipped."""
+    def handler(request):
+        return _fig_handler(request, img_status=404)
+
+    with _client_with_handler(handler) as client:
+        result = fetch_and_save("2503.99999", tmp_path, client=client)
+
+    assert result.markdown is not None
+    assert (tmp_path / "sources" / "2503.99999.md").exists()
+    # No image landed on disk; meta records an empty (or partial) manifest.
+    assert result.images == []
+    meta = json.loads((tmp_path / "sources" / "2503.99999.meta.json")
+                      .read_text(encoding="utf-8"))
+    assert meta["images"] == []
+
+
+def test_fetch_and_save_images_idempotent(tmp_path: Path):
+    """Cached re-fetch returns the image manifest without re-downloading."""
+    call_count = {"n": 0}
+
+    def handler(request):
+        call_count["n"] += 1
+        return _fig_handler(request)
+
+    with _client_with_handler(handler) as client:
+        first = fetch_and_save("2503.99999", tmp_path, client=client)
+        second = fetch_and_save("2503.99999", tmp_path, client=client)
+
+    # Second call served entirely from cache — no HTTP at all.
+    assert len(first.images) == 2
+    assert len(second.images) == 2
+    n_after_first = 1 + 2  # 1 html page + 2 image GETs
+    assert call_count["n"] == n_after_first
+
+
+def test_build_paper_archive_packages_md_and_images(tmp_path: Path):
+    import zipfile
+    from arxiv_radar_mcp.fulltext import build_paper_archive
+
+    with _client_with_handler(_fig_handler) as client:
+        fetch_and_save("2503.99999", tmp_path, client=client)
+
+    data = build_paper_archive(tmp_path, "2503.99999")
+    assert data is not None
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = set(zf.namelist())
+        # Single top-level <id>/ folder so unzipped papers never collide.
+        assert "2503.99999/2503.99999.md" in names
+        assert "2503.99999/2503.99999.media/x1.png" in names
+        assert "2503.99999/2503.99999.media/x2.png" in names
+        assert "2503.99999/2503.99999.meta.json" in names
+        # Image bytes survive the round-trip.
+        assert zf.read("2503.99999/2503.99999.media/x1.png") == _FAKE_PNG
+        # The md ref resolves relative to the md's folder.
+        md = zf.read("2503.99999/2503.99999.md").decode("utf-8")
+        assert "![](2503.99999.media/x1.png)" in md
+
+
+def test_build_paper_archive_none_when_not_fetched(tmp_path: Path):
+    from arxiv_radar_mcp.fulltext import build_paper_archive
+    assert build_paper_archive(tmp_path, "2503.00000") is None
+
+
+def test_build_paper_archive_rejects_traversal(tmp_path: Path):
+    from arxiv_radar_mcp.fulltext import build_paper_archive
+    assert build_paper_archive(tmp_path, "../../etc/passwd") is None
+    assert build_paper_archive(tmp_path, "..") is None
+
+
+def test_build_paper_archive_md_only_no_media(tmp_path: Path):
+    """A latex-path paper has no media dir — archive still builds with the md."""
+    import zipfile
+    from arxiv_radar_mcp.fulltext import build_paper_archive
+
+    sources = tmp_path / "sources"
+    sources.mkdir(parents=True)
+    (sources / "2503.88888.md").write_text("# Paper\n\nNo figures here.",
+                                           encoding="utf-8")
+
+    data = build_paper_archive(tmp_path, "2503.88888")
+    assert data is not None
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert zf.namelist() == ["2503.88888/2503.88888.md"]
+
+
+def test_html_to_markdown_without_manifest_ignores_images():
+    """Back-compat: the bare two-arg call (no `images` list) must not crash
+    and must not emit image refs — existing callers rely on this."""
+    from arxiv_radar_mcp.fulltext import _html_to_markdown
+    from selectolax.parser import HTMLParser
+
+    md = _html_to_markdown(_FAKE_HTML_WITH_FIG, parser_cls=HTMLParser)
+    assert "A paper with figures" in md
+    assert "![](" not in md            # no image refs without a manifest
+    assert ".media/" not in md
+    assert "The first figure caption." in md  # caption text still there

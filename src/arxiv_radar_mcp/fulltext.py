@@ -1,22 +1,32 @@
-"""arXiv full-text fetcher: HTML → LaTeX cascade.
+"""arXiv full-text fetcher: HTML -> LaTeX -> PDF cascade.
 
 For one arxiv_id, try in order:
-  1. arxiv.org/html/<id>     — author-LaTeX rendered to HTML by arXiv. Math
+  1. arxiv.org/html/<id>     -- author-LaTeX rendered to HTML by arXiv. Math
                                 preserved as <math><annotation encoding=
                                 "application/x-tex">...</annotation>; we
                                 extract the inline LaTeX. Coverage 70-80%
                                 of recent submissions (2020+).
-  2. arxiv.org/e-print/<id>  — gzipped tar of LaTeX source (or single .tex).
+  2. arxiv.org/e-print/<id>  -- gzipped tar of LaTeX source (or single .tex).
                                 Run pylatexenc to expand macros, drop
                                 comments, leave equations as inline `$...$`.
                                 Coverage ~85-90% of all arxiv submissions.
-  3. fail with explicit reason ("PDF-only on arXiv, full text not extractable
-     by this server").
+  3. arxiv.org/pdf/<id>      -- PDF download + MinerU parse (tier 3, U7).
+                                Available when `arxiv-radar-mcp[pdf]` /
+                                `corpus-core[pdf]` is installed.  Covers the
+                                remaining ~10-25% of PDF-only submissions.
+                                Install: pip install arxiv-radar-mcp[pdf]
+                                Without the extra: graceful error, no crash.
+  4. fail with explicit reason when all three tiers are exhausted.
 
 Output: markdown saved at <fulltext_dir>/sources/<arxiv_id>.md plus
 <fulltext_dir>/sources/<arxiv_id>.meta.json with `{source, fetch_time,
-n_chars, n_chunks_after_split}`. Idempotent — already-cached papers are
-skipped unless `force=True`.
+n_chars, n_chunks_after_split, images}`. Figure images referenced in the
+HTML render are downloaded into <fulltext_dir>/sources/<arxiv_id>.media/
+and the markdown carries `![caption](<id>.media/<name>)` refs.
+For the PDF tier, images are parsed by MinerU and placed in the same
+<arxiv_id>.media/ dir with refs rewritten from MinerU's "images/" to
+"<arxiv_id>.media/".
+Idempotent -- already-cached papers are skipped unless `force=True`.
 
 This module knows nothing about embeddings or chunking. It just turns an
 arxiv_id into clean markdown.
@@ -29,17 +39,27 @@ import json
 import logging
 import re
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
 import httpx
 
+from corpus_core.archive import PaperFiles
+from corpus_core.archive import build_paper_archive as _core_build_archive
+
 from corpus_core.http_fetch import (
     ARXIV_RATE_LIMIT_S,
+    fetch_arxiv_pdf,
     get_arxiv_throttle,
     request_with_retry,
 )
+
+# corpus_core.pdf is imported lazily inside _fetch_pdf() so that
+# `import arxiv_radar_mcp.fulltext` stays cheap on hosts without the
+# corpus-core[pdf] extra.  The module-level name below is just a sentinel.
+import corpus_core.pdf as _cc_pdf
 
 LOG = logging.getLogger(__name__)
 
@@ -84,6 +104,11 @@ class FetchResult:
     markdown: str | None     # None on failure
     n_chars: int             # 0 on failure
     error: str | None        # human-readable reason on failure
+    # Figure images discovered in the HTML render, as {"name": local filename,
+    # "url": absolute source URL}. Empty for the latex path and on failure.
+    # `fetch_and_save` downloads these into <id>.media/ and records the ones
+    # that landed on disk.
+    images: list[dict] = field(default_factory=list)
 
 
 def probe_html_available(
@@ -122,11 +147,57 @@ def probe_html_available(
             client.close()
 
 
-def fetch_paper(arxiv_id: str, *, client: httpx.Client | None = None) -> FetchResult:
-    """Try HTML, then LaTeX. Return whichever succeeded first.
+def rewrite_image_refs(markdown: str, *, from_: str, to_: str) -> str:
+    """Rewrite image reference directory in markdown.
 
-    Pass a shared `httpx.Client` when fetching a batch — connection reuse
+    Replaces `![](<from_>/name)` and `![alt](<from_>/name)` with
+    `![](<to_>/name)` (and same with alt).  Used to translate MinerU's
+    native "images/" subdir refs to the arxiv-radar public "<id>.media/"
+    convention required by the download zip and frontend consumers.
+
+    Only matches refs where the directory prefix is exactly `from_`
+    followed by `/` -- does not touch refs that already use `to_` or
+    unrelated refs.
+
+    Parameters
+    ----------
+    markdown : str
+        Input markdown text.
+    from_ : str
+        Source directory prefix (e.g. "images").
+    to_ : str
+        Target directory prefix (e.g. "2603.05238.media").
+
+    Returns
+    -------
+    str
+        Markdown with all matching refs rewritten.
+    """
+    if not from_ or not to_ or from_ == to_:
+        return markdown
+    # Match ![anything](<from_>/filename) -- captures optional alt text
+    # and the filename.  Uses a non-greedy match for the alt text so
+    # multiple images on the same line are handled correctly.
+    pattern = re.compile(
+        r"(!\[[^\]]*\]\()" + re.escape(from_) + r"/"
+    )
+    return pattern.sub(r"\g<1>" + to_ + "/", markdown)
+
+
+def fetch_paper(
+    arxiv_id: str,
+    *,
+    client: httpx.Client | None = None,
+    fulltext_dir: Path | None = None,
+) -> FetchResult:
+    """Try HTML, then LaTeX, then PDF (tier 3, U7). Return first success.
+
+    Pass a shared `httpx.Client` when fetching a batch -- connection reuse
     cuts wall time on 5+ papers significantly.
+
+    `fulltext_dir` is required for the PDF tier (MinerU writes images to
+    `<fulltext_dir>/sources/<id>.media/`).  When None, the PDF tier is
+    skipped even if MinerU is available.
     """
     own_client = client is None
     if own_client:
@@ -138,10 +209,12 @@ def fetch_paper(arxiv_id: str, *, client: httpx.Client | None = None) -> FetchRe
     try:
         # 1. HTML
         try:
-            md = _fetch_html(arxiv_id, client)
-            if md:
+            fetched = _fetch_html(arxiv_id, client)
+            if fetched:
+                md, images = fetched
                 return FetchResult(arxiv_id=arxiv_id, source="html",
-                                   markdown=md, n_chars=len(md), error=None)
+                                   markdown=md, n_chars=len(md), error=None,
+                                   images=images)
         except _FetchError as e:
             LOG.info(f"[{arxiv_id}] html unavailable: {e}")
 
@@ -154,14 +227,107 @@ def fetch_paper(arxiv_id: str, *, client: httpx.Client | None = None) -> FetchRe
         except _FetchError as e:
             LOG.info(f"[{arxiv_id}] e-print unavailable: {e}")
 
+        # 3. PDF tier (U7) -- only when fulltext_dir provided and MinerU available
+        if fulltext_dir is not None:
+            pdf_result = _fetch_pdf(arxiv_id, fulltext_dir)
+            if pdf_result is not None:
+                return pdf_result
+
+        pdf_tier_hint = (
+            " Install corpus-core[pdf] (pip install arxiv-radar-mcp[pdf]) "
+            "to enable PDF-tier parsing for this paper."
+            if not _cc_pdf.is_pdf_parser_available()
+            else ""
+        )
         return FetchResult(
             arxiv_id=arxiv_id, source=None, markdown=None, n_chars=0,
-            error=("no HTML or LaTeX source on arXiv — paper is PDF-only. "
-                   "PDF parsing is not supported in this server."),
+            error=(
+                "no HTML or LaTeX source on arXiv -- paper is PDF-only."
+                + pdf_tier_hint
+            ),
         )
     finally:
         if own_client:
             client.close()
+
+
+def _fetch_pdf(arxiv_id: str, fulltext_dir: Path) -> FetchResult | None:
+    """Tier-3 PDF fetch + MinerU parse.  Returns FetchResult or None on error.
+
+    None is returned when:
+      - MinerU is not installed (graceful degradation).
+      - PDF download fails.
+      - MinerU parse fails.
+      - Parsed markdown looks like a stub (scan-only PDF with no OCR layer).
+
+    In all failure cases a human-readable FetchResult(error=...) is
+    returned (NOT None) so the caller can surface the reason.  None is
+    returned only when the PDF tier is silently unavailable.
+
+    Image files are placed in <fulltext_dir>/sources/<arxiv_id>.media/.
+    Markdown refs are rewritten from MinerU's native "images/" to
+    "<arxiv_id>.media/" so they resolve correctly in the download zip.
+    """
+    if not _cc_pdf.is_pdf_parser_available():
+        return FetchResult(
+            arxiv_id=arxiv_id, source=None, markdown=None, n_chars=0,
+            error=(
+                "PDF-only paper on arXiv; install arxiv-radar-mcp[pdf] "
+                "to enable PDF-tier parsing."
+            ),
+        )
+
+    sources_dir = fulltext_dir / "sources"
+    inbox_dir = fulltext_dir / "inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download PDF -- uses the shared arxiv throttle from corpus_core.
+    fetch_res = fetch_arxiv_pdf(arxiv_id, inbox_dir, overwrite=False)
+    if not fetch_res.ok:
+        return FetchResult(
+            arxiv_id=arxiv_id, source=None, markdown=None, n_chars=0,
+            error=f"PDF download failed: {fetch_res.error or f'http {fetch_res.status}'}",
+        )
+
+    pdf_path = fetch_res.dest_path
+    assert pdf_path is not None  # ok=True guarantees dest_path is set
+
+    # MinerU parse -- images go directly to <id>.media/ (our public dir).
+    media_dir = sources_dir / f"{arxiv_id}.media"
+    try:
+        parse_res = _cc_pdf.parse_pdf(
+            pdf_path,
+            media_out_dir=media_dir,
+        )
+    except _cc_pdf.PdfParseError as exc:
+        return FetchResult(
+            arxiv_id=arxiv_id, source=None, markdown=None, n_chars=0,
+            error=f"PDF parse failed: {exc}",
+        )
+
+    # Rewrite MinerU's "images/" refs -> "<arxiv_id>.media/" so the
+    # download zip resolves correctly.
+    md = rewrite_image_refs(
+        parse_res.markdown,
+        from_=parse_res.media_subdir_in_md,
+        to_=f"{arxiv_id}.media",
+    )
+
+    if _cc_pdf.looks_like_pdf_stub(md):
+        return FetchResult(
+            arxiv_id=arxiv_id, source=None, markdown=None, n_chars=0,
+            error="PDF parse produced stub (scan-only PDF or no text layer)",
+        )
+
+    images = [{"name": img["name"]} for img in parse_res.images]
+    return FetchResult(
+        arxiv_id=arxiv_id,
+        source="pdf",
+        markdown=md,
+        n_chars=len(md),
+        error=None,
+        images=images,
+    )
 
 
 def fetch_and_save(
@@ -174,13 +340,18 @@ def fetch_and_save(
     """Fetch one paper and persist to <fulltext_dir>/sources/<id>.md (+ meta.json).
 
     Idempotent: returns cached result if .md already exists and `force=False`.
-    The meta.json's `n_chunks_after_split` is left as 0 here — the chunker
+    The meta.json's `n_chunks_after_split` is left as 0 here -- the chunker
     fills it in during reindex.
+
+    U7: passes `fulltext_dir` to `fetch_paper` so the PDF tier (tier 3)
+    can place its images in `sources/<id>.media/`.  For source="pdf" we do
+    NOT call _download_images (images are already on disk from MinerU).
     """
     sources_dir = fulltext_dir / "sources"
     sources_dir.mkdir(parents=True, exist_ok=True)
     md_path = sources_dir / f"{arxiv_id}.md"
     meta_path = sources_dir / f"{arxiv_id}.meta.json"
+    media_dir = sources_dir / f"{arxiv_id}.media"
 
     if md_path.exists() and meta_path.exists() and not force:
         try:
@@ -189,21 +360,142 @@ def fetch_and_save(
                 arxiv_id=arxiv_id, source=meta.get("source"),
                 markdown=md_path.read_text(encoding="utf-8"),
                 n_chars=meta.get("n_chars", 0), error=None,
+                images=meta.get("images", []),
             )
         except (json.JSONDecodeError, OSError) as e:
             LOG.warning(f"[{arxiv_id}] cached meta unreadable, re-fetching: {e}")
 
-    result = fetch_paper(arxiv_id, client=client)
-    if result.markdown is not None:
-        md_path.write_text(result.markdown, encoding="utf-8")
-        meta_path.write_text(json.dumps({
-            "arxiv_id": arxiv_id,
-            "source": result.source,
-            "fetch_time": datetime.now(timezone.utc).isoformat(),
-            "n_chars": result.n_chars,
-            "n_chunks_after_split": 0,   # filled in by reindex
-        }, indent=1), encoding="utf-8")
-    return result
+    # Use a shared client for the page fetch AND the image downloads so they
+    # ride the same connection pool + arXiv rate limiter.
+    own_client = client is None
+    if own_client:
+        client = httpx.Client(
+            timeout=_TIMEOUT,
+            headers={"User-Agent": _USER_AGENT},
+            follow_redirects=True,
+        )
+    try:
+        # Pass fulltext_dir so fetch_paper can activate the PDF tier (U7).
+        result = fetch_paper(arxiv_id, client=client, fulltext_dir=fulltext_dir)
+        if result.markdown is not None:
+            md_path.write_text(result.markdown, encoding="utf-8")
+
+            if result.source == "pdf":
+                # PDF tier: images already on disk from MinerU parse.
+                # result.images already carries {name} dicts from _fetch_pdf.
+                # Enrich with n_bytes from disk for meta consistency.
+                saved = []
+                for img in result.images:
+                    name = img.get("name")
+                    if not name:
+                        continue
+                    p = media_dir / name
+                    if p.exists():
+                        saved.append({"name": name, "n_bytes": p.stat().st_size})
+                result.images = saved
+            else:
+                saved = _download_images(result.images, media_dir, client=client)
+                result.images = saved
+
+            meta_path.write_text(json.dumps({
+                "arxiv_id": arxiv_id,
+                "source": result.source,
+                "fetch_time": datetime.now(timezone.utc).isoformat(),
+                "n_chars": result.n_chars,
+                "n_chunks_after_split": 0,   # filled in by reindex
+                "images": result.images,
+                "parse_quality": _parse_quality(result),
+            }, indent=1), encoding="utf-8")
+        return result
+    finally:
+        if own_client:
+            client.close()
+
+
+# ---------------------------------------------------------------------------
+# Parse quality observability
+# ---------------------------------------------------------------------------
+
+
+def _parse_quality(result: "FetchResult") -> dict:
+    """Build a parse_quality summary dict for meta.json.
+
+    Records which branch of the fetch cascade produced the markdown,
+    basic structural statistics, and whether the echo-skeleton detector
+    was triggered (it always fires during _fetch_html; its result is
+    what determines whether we fell through to e-print). The function
+    NEVER changes any parsing logic or thresholds -- it only observes.
+
+    Fields:
+      branch          "html" | "latex" | "pdf" | None (same as FetchResult.source)
+      n_headings      int  -- number of ## headings in the final markdown
+      avg_body_len    float -- mean chars per inter-heading span
+      echo_skeleton   bool -- True iff _looks_like_echo_skeleton fired on
+                              the html render (always False for latex/pdf branch,
+                              since we only call the detector in _fetch_html)
+    """
+    if result.markdown is None:
+        return {
+            "branch": None,
+            "n_headings": 0,
+            "avg_body_len": 0.0,
+            "echo_skeleton": False,
+        }
+
+    lines = result.markdown.split("\n")
+    heading_idxs = [i for i, ln in enumerate(lines) if ln.startswith("## ")]
+    n_headings = len(heading_idxs)
+
+    if n_headings == 0:
+        avg_body_len = float(len(result.markdown))
+    else:
+        body_lengths: list[int] = []
+        for k, hi in enumerate(heading_idxs):
+            end = heading_idxs[k + 1] if k + 1 < n_headings else len(lines)
+            span = "\n".join(lines[hi + 1:end]).strip()
+            body_lengths.append(len(span))
+        avg_body_len = sum(body_lengths) / len(body_lengths) if body_lengths else 0.0
+
+    # echo_skeleton: only relevant for the html branch.
+    # For latex and pdf, the detector is not consulted.
+    echo_skeleton = False
+    if result.source == "html" and result.markdown:
+        echo_skeleton = _looks_like_echo_skeleton(result.markdown)
+
+    return {
+        "branch": result.source,
+        "n_headings": n_headings,
+        "avg_body_len": round(avg_body_len, 1),
+        "echo_skeleton": echo_skeleton,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Archive (download side-channel)
+# ---------------------------------------------------------------------------
+
+
+def paper_files(fulltext_dir: Path, arxiv_id: str) -> PaperFiles:
+    """Locate a fetched paper's pieces for the download archive.
+
+    arxiv-radar keeps figures in `sources/<id>.media/` and the markdown
+    refs them as `![](<id>.media/<name>)`, so the in-archive subdir name
+    matches the source dir name.
+    """
+    sources_dir = fulltext_dir / "sources"
+    return PaperFiles(
+        markdown_path=sources_dir / f"{arxiv_id}.md",
+        media_dir=sources_dir / f"{arxiv_id}.media",
+        media_arcname=f"{arxiv_id}.media",
+        meta_path=sources_dir / f"{arxiv_id}.meta.json",
+    )
+
+
+def build_paper_archive(fulltext_dir: Path, arxiv_id: str) -> bytes | None:
+    """Zip a fetched paper (markdown + figures + meta) into one `<id>/`
+    folder. Thin adapter over `corpus_core.build_paper_archive` — see there
+    for the layout. Returns None when the paper has not been fetched yet."""
+    return _core_build_archive(arxiv_id, paper_files(fulltext_dir, arxiv_id))
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +507,15 @@ class _FetchError(Exception):
     pass
 
 
-def _fetch_html(arxiv_id: str, client: httpx.Client) -> str | None:
-    """GET arxiv.org/html/<id>, return clean markdown or None.
+def _fetch_html(
+    arxiv_id: str, client: httpx.Client,
+) -> tuple[str, list[dict]] | None:
+    """GET arxiv.org/html/<id>, return (clean markdown, image manifest) or None.
+
+    The image manifest is a list of {"name", "url"} for every <img> in the
+    render, with `url` resolved against the (post-redirect) page URL so the
+    caller can download them. Markdown carries `![alt](<id>.media/<name>)`
+    refs to the same names.
 
     Returns None when the response is the "no HTML available" stub page that
     arXiv serves (status 200 with a fallback message), OR when the body
@@ -232,10 +531,14 @@ def _fetch_html(arxiv_id: str, client: httpx.Client) -> str | None:
         raise _FetchError(f"http {r.status_code}")
 
     # arxiv serves a fallback HTML on missing renders — usually a tiny page.
-    # Sniff before we pay for full parse.
+    # Sniff before we pay for full parse. Older stub: "no HTML available"
+    # (<5 KB); newer stub: a ~11 KB shell whose <title> is empty and body
+    # says "No HTML" — catch both.
     body = r.text
     if len(body) < 5_000 and ("Conversion is not available" in body
                               or "no HTML available" in body.lower()):
+        return None
+    if len(body) < 15_000 and "<title> | arXiv e-print repository</title>" in body:
         return None
 
     try:
@@ -243,12 +546,16 @@ def _fetch_html(arxiv_id: str, client: httpx.Client) -> str | None:
     except ImportError as e:
         raise _FetchError(f"selectolax not installed: {e}") from e
 
-    md = _html_to_markdown(body, parser_cls=HTMLParser)
+    images: list[dict] = []
+    md = _html_to_markdown(
+        body, parser_cls=HTMLParser,
+        base_url=str(r.url), image_dir=f"{arxiv_id}.media", images=images,
+    )
     if md and _looks_like_echo_skeleton(md):
         LOG.info(f"[{arxiv_id}] html render is echo-skeleton "
                  f"(headings present, bodies empty); falling through to e-print")
         return None
-    return md
+    return md, images
 
 
 _NUM_PREFIX_RE = re.compile(
@@ -330,8 +637,16 @@ def _looks_like_echo_skeleton(md: str) -> bool:
     return (near_empty / n) > 0.70 or avg < 50
 
 
-def _html_to_markdown(html: str, *, parser_cls) -> str:
+def _html_to_markdown(
+    html: str, *, parser_cls,
+    base_url: str = "", image_dir: str = "", images: list[dict] | None = None,
+) -> str:
     """Walk the arxiv HTML structure and emit markdown.
+
+    When `images` (a mutable list) is supplied, every <img> is recorded as
+    {"name", "url"} (url resolved against `base_url`) and rendered inline as
+    `![alt](image_dir/name)`. Omit `images` to skip figure handling entirely
+    (back-compat: the bare two-arg call still returns plain markdown).
 
     arxiv.org/html/<id> is LaTeXML-rendered — fairly stable top-level
     structure:
@@ -369,7 +684,10 @@ def _html_to_markdown(html: str, *, parser_cls) -> str:
                or tree.css_first("div.ltx_page_main")
                or tree.body)
     if article:
-        body = _node_to_markdown(article, skip_first_heading=False)
+        body = _node_to_markdown(
+            article, skip_first_heading=False,
+            base_url=base_url, image_dir=image_dir, images=images,
+        )
         if body:
             parts.append(body)
 
@@ -420,7 +738,10 @@ def _iter_descendants(root):
             yield n
 
 
-def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
+def _node_to_markdown(
+    node, *, skip_first_heading: bool,
+    base_url: str = "", image_dir: str = "", images: list[dict] | None = None,
+) -> str:
     """Recursively render a node subtree to text/markdown.
 
     Heading promotion in arxiv (LaTeXML-rendered) HTML is **driven by CSS
@@ -482,6 +803,25 @@ def _node_to_markdown(node, *, skip_first_heading: bool) -> str:
                 is_display = (n.attributes.get("display") == "block"
                               or "ltx_displaymath" in cls)
                 pieces.append(f"\n$$\n{tex}\n$$\n" if is_display else f"${tex}$")
+            n.decompose()
+            continue
+
+        # Figure images. Only when a manifest list is provided (the ingest
+        # path). Resolve the src against the page URL, record it for download,
+        # and emit a markdown image ref pointing at the local media dir. The
+        # arXiv `alt` is almost always the placeholder "Refer to caption", so
+        # we drop it — the real caption follows as figcaption text anyway.
+        if n.tag == "img" and images is not None:
+            src = (n.attributes.get("src") or "").strip()
+            if src:
+                name = _safe_image_name(src)
+                url = urljoin(base_url, src) if base_url else src
+                if not any(im["name"] == name for im in images):
+                    images.append({"name": name, "url": url})
+                ref = f"{image_dir}/{name}" if image_dir else name
+                if pieces and not pieces[-1].endswith("\n"):
+                    pieces.append("\n\n")
+                pieces.append(f"![]({ref})\n\n")
             n.decompose()
             continue
 
@@ -559,6 +899,59 @@ def _heading_md_level(cls: str) -> int | None:
     if "ltx_title" in cls:
         return 3
     return None
+
+
+_IMG_NAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_image_name(src: str) -> str:
+    """Derive a safe local filename from an <img> src.
+
+    Drops any directory components and query/fragment, then sanitises the
+    basename to [A-Za-z0-9._-] so it can't escape the media dir. Falls back
+    to 'figure.png' when nothing usable remains.
+
+        '2603.05238v2/x1.png'        -> 'x1.png'
+        'extracted/3/fig%201.png?x'  -> 'fig_201.png'
+    """
+    base = src.split("?")[0].split("#")[0].rstrip("/")
+    base = base.replace("\\", "/").split("/")[-1]
+    base = _IMG_NAME_SAFE_RE.sub("_", base).lstrip(".")
+    return base or "figure.png"
+
+
+def _download_images(
+    images: list[dict], dest_dir: Path, *, client: httpx.Client,
+) -> list[dict]:
+    """Download each {"name", "url"} image into dest_dir. Best-effort.
+
+    Returns the subset that landed on disk (with bytes recorded under
+    "n_bytes"). Individual failures are logged and skipped — a missing
+    figure must never fail the whole paper fetch. Already-present files are
+    kept (idempotent re-fetch).
+    """
+    if not images:
+        return []
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[dict] = []
+    for im in images:
+        name, url = im.get("name"), im.get("url")
+        if not name or not url:
+            continue
+        path = dest_dir / name
+        if path.exists() and path.stat().st_size > 0:
+            saved.append({"name": name, "url": url, "n_bytes": path.stat().st_size})
+            continue
+        try:
+            r = _request_with_retry(client, url)
+            if r.status_code != 200 or not r.content:
+                LOG.info(f"image {url}: http {r.status_code}, skipping")
+                continue
+            path.write_bytes(r.content)
+            saved.append({"name": name, "url": url, "n_bytes": len(r.content)})
+        except (httpx.HTTPError, OSError) as e:
+            LOG.info(f"image {url}: {type(e).__name__}: {e}, skipping")
+    return saved
 
 
 def _clean_text(node) -> str:

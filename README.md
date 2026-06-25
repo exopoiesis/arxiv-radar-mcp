@@ -121,6 +121,40 @@ For long-running GPU backends, `scripts/docker_setup_source.sh` creates
 local sparse clones for all default science areas and rewrites
 `/cache/radar.toml` to use `type = "local"`.
 
+## Figure images & `GET /download`
+
+`fetch_papers` (HTML path) now also downloads the figure images referenced
+in the render into `<fulltext_dir>/sources/<id>.media/`, and the cached
+markdown carries `![](<id>.media/<name>)` refs next to the captions. The
+e-print/LaTeX path stays text-only (its figures are usually vector PDF/EPS
+we can't render). `meta.json` records the image manifest.
+
+MCP's JSON-RPC can't ship a multi-MB figure bundle, so — mirroring
+lab-corpus's `POST /upload` — the HTTP backend exposes a binary
+side-channel on the same port as `/mcp`:
+
+```
+GET /download?id=<arxiv_id>   →  application/zip
+```
+
+The zip holds one top-level folder so unzipped papers never collide:
+
+```
+<id>/<id>.md            # markdown, refs resolve relative to this file
+<id>/<id>.media/x1.png  # figure images
+<id>/<id>.meta.json     # source, n_chars, image manifest
+```
+
+Fetch the paper first (`fetch_papers`), then pull the bundle. Over the
+SSH-tunnelled remote backend (port 8765 → local 18765):
+
+```bash
+curl -s "http://localhost:18765/download?id=2603.05238" -o paper.zip
+unzip paper.zip          # → 2603.05238/2603.05238.md + .media/
+```
+
+Responses: `200` zip · `400` missing `id` · `404` not fetched yet.
+
 ## Full-text fetch cascade
 
 Per arxiv_id, in order, stop at first success:
@@ -440,6 +474,20 @@ shared Qwen instance.
 | Cold start per Claude session | ~5 sec | <100 ms (backend stays loaded) |
 | Setup steps | `pip install` + 1 line config | container + ssh keys + 1 line config |
 | Auth | n/a | SSH keys you already have |
+
+> **UNSUPPORTED: two separate backends on one GPU.**
+> Running arxiv-radar-mcp and lab-corpus-mcp as two independent standalone
+> backends on the same GPU is **not supported** (DECISIONS-136). Each would
+> load its own copy of Qwen3-Embedding-4B (~8 GB bf16), totalling ~16 GB --
+> OOM on a 12 GB card (RTX 4070, etc.) with spillover on larger cards.
+>
+> Shared GPU hosting is only supported through the **combined-supervisor**
+> in `lab-corpus-mcp` (`lab_corpus_mcp/combined.py`), which injects a single
+> shared `Encoder` instance into both servers so the model is loaded exactly
+> once. Use `bash scripts/docker_serve_backend.sh` from the `lab-corpus-mcp`
+> repo to start the combined backend. The server will log a WARNING at
+> startup if it detects a standalone encoder on a GPU that already carries
+> significant VRAM load from other processes.
 
 ## Troubleshooting
 

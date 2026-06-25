@@ -22,8 +22,6 @@ next interval.
 """
 from __future__ import annotations
 
-import io
-import json
 import logging
 import shutil
 import subprocess
@@ -33,7 +31,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from corpus_core.embeddings import EmbeddingIndex
-from corpus_core.jobs import JobError
 
 if TYPE_CHECKING:
     from arxiv_radar_mcp.server import RadarServer
@@ -128,8 +125,7 @@ def refresh_sources(
 
     # 4. Atomic persist.
     cache_dir = radar.config.embeddings.cache_dir
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_save(cache_dir, matrix, row_for, model_name=radar.encoder.model_name)
+    EmbeddingIndex.save(cache_dir, matrix, row_for, model=radar.encoder.model_name)
 
     # 5. Hot-swap in-memory refs.
     radar.abstract_index = EmbeddingIndex.load(cache_dir)
@@ -151,26 +147,9 @@ def _atomic_save(
     *,
     model_name: str,
 ) -> None:
-    """Write embeddings.npy + index.json atomically (write .tmp → rename).
+    """Write embeddings.npy + index.json atomically.
 
-    `np.save` would normally append `.npy` to a filename without it; we
-    open the file by handle so the .tmp name is respected.
+    Thin wrapper over EmbeddingIndex.save -- kept for backward compatibility
+    with tests and scripts that import this function directly.
     """
-    npy_final = cache_dir / "embeddings.npy"
-    json_final = cache_dir / "index.json"
-    npy_tmp = cache_dir / "embeddings.npy.tmp"
-    json_tmp = cache_dir / "index.json.tmp"
-
-    with open(npy_tmp, "wb") as f:
-        np.save(f, matrix)
-
-    payload = {
-        "model": model_name,
-        "dims": int(matrix.shape[1]),
-        "n": int(matrix.shape[0]),
-        "row_for": row_for,
-    }
-    json_tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-
-    npy_tmp.replace(npy_final)
-    json_tmp.replace(json_final)
+    EmbeddingIndex.save(cache_dir, matrix, row_for, model=model_name)

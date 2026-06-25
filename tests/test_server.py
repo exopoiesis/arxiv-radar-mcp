@@ -19,7 +19,8 @@ import inspect
 import pytest
 
 from arxiv_radar_mcp.server import (TOOL_SPECS, RadarServer, _dispatch,
-                                    _paper_payload)
+                                    _paper_payload,
+                                    _warn_if_shared_gpu_risk)
 
 
 # ----- TOOL_SPECS shape ------------------------------------------------------
@@ -370,13 +371,17 @@ def test_list_tags_prefix_filter(local_config):
 # ----- U2: validate_arxiv_ids -------------------------------------------------
 
 
-def test_validate_arxiv_ids_partitions_ok_and_pdf_only(local_config, monkeypatch):
-    """HEAD-probe every id, partition into {ok, pdf_only}. Nothing fancy:
-    if probe returns True the id has an HTML render (or a stub — caller can
-    still try); if False arxiv has no HTML for it (PDF-only)."""
+def test_validate_arxiv_ids_partitions_ok_and_pdf_fallback(local_config, monkeypatch):
+    """HEAD-probe every id, partition into {ok, pdf_fallback}. Nothing fancy:
+    if probe returns True the id has an HTML render (or a stub -- caller can
+    still try); if False arxiv has no HTML for it (pdf_fallback -- can be
+    served by PDF tier when [pdf] extra installed).
+
+    U7: bucket renamed pdf_only -> pdf_fallback; pdf_parser_available added.
+    """
     radar = RadarServer(local_config)
     try:
-        # Stub the probe so we don't hit network. Even-suffix → ok, odd → pdf.
+        # Stub the probe so we don't hit network. Even-suffix -> ok, odd -> pdf.
         def fake_probe(arxiv_id, *, client=None):
             return int(arxiv_id.replace(".", "")) % 2 == 0
         monkeypatch.setattr("arxiv_radar_mcp.server.probe_html_available",
@@ -387,7 +392,9 @@ def test_validate_arxiv_ids_partitions_ok_and_pdf_only(local_config, monkeypatch
         })
         assert out["n_total"] == 4
         assert sorted(out["ok"]) == ["2503.00002", "2504.00004"]
-        assert sorted(out["pdf_only"]) == ["2503.00003", "2504.00005"]
+        # U7: key renamed from pdf_only to pdf_fallback
+        assert sorted(out["pdf_fallback"]) == ["2503.00003", "2504.00005"]
+        assert "pdf_parser_available" in out
     finally:
         radar.jobs.shutdown()
 
@@ -524,3 +531,151 @@ def test_blocking_refresh_skipped_when_lock_held(local_config):
             radar.jobs.release_reindex_lock()
     finally:
         radar.jobs.shutdown()
+
+
+# ----- _warn_if_shared_gpu_risk (DECISIONS-136) ------------------------------
+
+def test_warn_if_shared_gpu_risk_no_warning_when_encoder_injected(
+        local_config, caplog):
+    """When encoder is injected (combined-supervisor path), _warn_if_shared_gpu_risk
+    is never called and no DECISIONS-136 warning appears in the log."""
+    from corpus_core.embeddings import Encoder
+
+    stub_encoder = Encoder(local_config)
+    with caplog.at_level("WARNING"):
+        radar = RadarServer(local_config, encoder=stub_encoder)
+    try:
+        assert not any("DECISIONS-136" in rec.message for rec in caplog.records), (
+            "combined-supervisor path must NOT emit the shared-GPU warning")
+    finally:
+        radar.jobs.shutdown()
+
+
+def test_warn_if_shared_gpu_risk_no_crash_when_cuda_unavailable(caplog):
+    """_warn_if_shared_gpu_risk never raises even when torch says CUDA is
+    unavailable (CPU-only host). Uses monkeypatching, no real GPU needed."""
+    import arxiv_radar_mcp.server as srv_mod
+
+    # Simulate no CUDA: patch torch.cuda.is_available to return False.
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    class _FakeTorch:
+        cuda = _FakeCuda()
+
+    import sys
+    original = sys.modules.get("torch")
+    sys.modules["torch"] = _FakeTorch()  # type: ignore[assignment]
+    try:
+        with caplog.at_level("WARNING"):
+            _warn_if_shared_gpu_risk()  # must not raise
+        assert not any("DECISIONS-136" in rec.message for rec in caplog.records), (
+            "CPU-only host: no DECISIONS-136 warning expected")
+    finally:
+        if original is None:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = original
+
+
+def test_warn_if_shared_gpu_risk_emits_warning_when_vram_busy(caplog):
+    """_warn_if_shared_gpu_risk logs a WARNING referencing DECISIONS-136 when
+    CUDA is available and used VRAM exceeds the 2 GB threshold."""
+    import sys
+    import arxiv_radar_mcp.server as srv_mod
+
+    # Simulate 8 GB used out of 12 GB total (typical Qwen3-4B load).
+    _TOTAL = 12 * 1024 * 1024 * 1024
+    _FREE  = 4 * 1024 * 1024 * 1024   # 4 GB free -> 8 GB used
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def mem_get_info():
+            return (_FREE, _TOTAL)
+
+    class _FakeTorch:
+        cuda = _FakeCuda()
+
+    original = sys.modules.get("torch")
+    sys.modules["torch"] = _FakeTorch()  # type: ignore[assignment]
+    try:
+        with caplog.at_level("WARNING"):
+            _warn_if_shared_gpu_risk()
+        assert any("DECISIONS-136" in rec.message for rec in caplog.records), (
+            "high-VRAM path must emit DECISIONS-136 warning")
+        assert any("UNSUPPORTED" in rec.message for rec in caplog.records)
+    finally:
+        if original is None:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = original
+
+
+def test_warn_if_shared_gpu_risk_no_warning_when_vram_low(caplog):
+    """No warning when VRAM usage is below the 2 GB threshold (standalone
+    with model not yet loaded)."""
+    import sys
+
+    _TOTAL = 12 * 1024 * 1024 * 1024
+    _FREE  = 11 * 1024 * 1024 * 1024  # only 1 GB used
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def mem_get_info():
+            return (_FREE, _TOTAL)
+
+    class _FakeTorch:
+        cuda = _FakeCuda()
+
+    original = sys.modules.get("torch")
+    sys.modules["torch"] = _FakeTorch()  # type: ignore[assignment]
+    try:
+        with caplog.at_level("WARNING"):
+            _warn_if_shared_gpu_risk()
+        assert not any("DECISIONS-136" in rec.message for rec in caplog.records), (
+            "low-VRAM path must NOT emit DECISIONS-136 warning")
+    finally:
+        if original is None:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = original
+
+
+def test_warn_if_shared_gpu_risk_swallows_exceptions(caplog):
+    """If torch.cuda.mem_get_info raises (e.g. driver error), no exception
+    propagates and no warning is emitted."""
+    import sys
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def mem_get_info():
+            raise RuntimeError("CUDA driver error simulated")
+
+    class _FakeTorch:
+        cuda = _FakeCuda()
+
+    original = sys.modules.get("torch")
+    sys.modules["torch"] = _FakeTorch()  # type: ignore[assignment]
+    try:
+        with caplog.at_level("WARNING"):
+            _warn_if_shared_gpu_risk()  # must not raise
+        assert not any("DECISIONS-136" in rec.message for rec in caplog.records)
+    finally:
+        if original is None:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = original

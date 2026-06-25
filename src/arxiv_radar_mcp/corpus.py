@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,14 +102,40 @@ def _load_github(src: SourceConfig, config: Config) -> Iterable[Paper]:
     cache = config.embeddings.cache_dir / "shards" / src.name
     _prepare_github_cache(cache, repo=src.repo, branch=src.branch)
 
-    shard_names = _list_shards_via_api(src.repo, src.branch)
+    try:
+        shard_names = _list_shards_via_api(src.repo, src.branch)
+    except (httpx.HTTPError, httpx.HTTPStatusError) as exc:
+        # Fail-soft on network/rate-limit error: if we have cached shards,
+        # serve them with a warning. On cold start (no cache) re-raise so
+        # the caller knows there is nothing to serve.
+        cached = sorted(cache.glob("papers-*.json"))
+        if cached:
+            LOG.warning(
+                f"  {src.name}: GitHub API failed ({type(exc).__name__}: {exc}); "
+                f"using {len(cached)} cached shard(s)"
+            )
+            shard_names = [p.name for p in cached]
+        else:
+            raise
+
     n = 0
     for shard_name in shard_names:
         local = cache / shard_name
         if not local.exists():
-            url = f"https://raw.githubusercontent.com/{src.repo}/{src.branch}/data/{shard_name}"
-            r = httpx.get(url, timeout=30.0)
-            r.raise_for_status()
+            url = (
+                f"https://raw.githubusercontent.com/{src.repo}"
+                f"/{src.branch}/data/{shard_name}"
+            )
+            headers = _github_headers()
+            try:
+                r = httpx.get(url, timeout=30.0, headers=headers)
+                r.raise_for_status()
+            except (httpx.HTTPError, httpx.HTTPStatusError) as exc:
+                LOG.warning(
+                    f"  {src.name}: failed to download {shard_name} "
+                    f"({type(exc).__name__}: {exc}); skipping shard"
+                )
+                continue
             local.write_bytes(r.content)
         with open(local, encoding="utf-8") as f:
             records = json.load(f)
@@ -142,10 +169,28 @@ def _prepare_github_cache(cache: Path, *, repo: str, branch: str) -> None:
     marker.write_text(json.dumps(expected, indent=1), encoding="utf-8")
 
 
+def _github_headers() -> dict[str, str]:
+    """Build HTTP headers for GitHub API / raw content requests.
+
+    If GITHUB_TOKEN is set in the environment, include an Authorization
+    header to raise the unauthenticated rate limit (60 req/h) to 5000 req/h
+    and avoid 429 failures on busy hosts.
+    """
+    headers: dict[str, str] = {}
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _list_shards_via_api(repo: str, branch: str) -> list[str]:
-    """Use GitHub's contents API to list /data/papers-*.json filenames."""
+    """Use GitHub's contents API to list /data/papers-*.json filenames.
+
+    Raises httpx.HTTPStatusError on non-2xx (including 429 rate limit).
+    Caller is responsible for fail-soft handling when cached shards exist.
+    """
     url = f"https://api.github.com/repos/{repo}/contents/data?ref={branch}"
-    r = httpx.get(url, timeout=30.0)
+    r = httpx.get(url, timeout=30.0, headers=_github_headers())
     r.raise_for_status()
     return [item["name"] for item in r.json()
             if item["type"] == "file"

@@ -148,7 +148,7 @@ plugin between the two mcp servers.
 | U10 echo-skeleton detector | `arxiv-radar-mcp/fulltext.py` | arxiv only (LaTeXML quirk) |
 | U10b selectolax DFS workaround | `arxiv-radar-mcp/fulltext.py` | arxiv only (HTML parser quirk; lab-corpus uses different parsers) |
 | U13 anchor URL preservation | `arxiv-radar-mcp/fulltext.py` | arxiv only (LaTeXML→HTML quirk) |
-| PDF stub detector (when written) | `corpus-core/pdf.py` (in `[pdf]` extra) | both |
+| PDF stub detector + MineruRunner + parse_pdf + unload_pdf_models | `corpus-core/pdf.py` (in `[pdf]` extra) -- DONE 2026-06-25 (U7) | both |
 | Whisper-chunk-by-slide pattern | `corpus-core/video.py` (in `[video]` extra) | both |
 | RAW: AND-context query design | `corpus-core` doc | both (config authors learn from radar precedent) |
 

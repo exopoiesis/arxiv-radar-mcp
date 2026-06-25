@@ -35,6 +35,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pdf = [
+    # U7: PDF-tier parsing via MinerU (corpus-core[pdf] pulls in mineru[core]).
+    # Install: pip install arxiv-radar-mcp[pdf]
+    "corpus-core[pdf]",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

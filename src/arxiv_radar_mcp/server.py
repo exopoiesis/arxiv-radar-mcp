@@ -28,7 +28,9 @@ import httpx
 from arxiv_radar_mcp.config import Config, load
 from arxiv_radar_mcp.corpus import Paper, load_all
 from corpus_core.embeddings import EmbeddingIndex, Encoder
-from arxiv_radar_mcp.fulltext import fetch_and_save, probe_html_available
+from arxiv_radar_mcp.fulltext import (fetch_and_save, paper_files,
+                                      probe_html_available)
+from corpus_core.archive import make_download_handler
 from corpus_core.corpus_index import (FULLTEXT_MAX_SEQ_LENGTH,
                                             load_chunk_texts, reindex,
                                             search_paper_semantic,
@@ -47,6 +49,52 @@ from corpus_core.search import (search_semantic, search_text, similar_to)
 
 LOG = logging.getLogger(__name__)
 
+# Threshold for the "other processes already hold a lot of VRAM" check.
+# Qwen3-Embedding-4B in bf16 occupies ~7-8 GB, so even partial occupancy
+# above this level signals that another copy is likely already resident.
+_SHARED_GPU_RISK_VRAM_THRESHOLD_MB = 2048  # 2 GB
+
+
+def _warn_if_shared_gpu_risk() -> None:
+    """Log a WARNING when a standalone (non-injected) Encoder is about to be
+    created on a GPU that already carries significant VRAM load from other
+    processes.
+
+    Rationale: arxiv-radar and lab-corpus each load Qwen3-Embedding-4B
+    (~7-8 GB bf16). Running them as two separate standalone backends on the
+    same 12 GB GPU = ~16 GB total -> OOM / spillover. The supported
+    topology is the combined-supervisor (lab-corpus-mcp) that injects a
+    single shared Encoder into both servers. See DECISIONS-136.
+
+    Detection: torch.cuda.mem_get_info() returns (free, total) for the
+    default device; "used" = total - free. If other processes hold > 2 GB
+    we warn.
+
+    Safety contract:
+    - Called ONLY when encoder=None (standalone path).
+    - Any exception (CUDA unavailable, torch absent, driver error) is
+      silently swallowed so a CPU-only or non-CUDA host never sees a
+      spurious warning or a startup failure.
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        used_mb = (total_bytes - free_bytes) / (1024 * 1024)
+        if used_mb > _SHARED_GPU_RISK_VRAM_THRESHOLD_MB:
+            LOG.warning(
+                "arxiv-radar standalone encoder on a GPU that already has "
+                "%.0f MB used by other processes. Running arxiv-radar and "
+                "lab-corpus as separate backends on one GPU is UNSUPPORTED "
+                "(two Qwen3-4B copies ~16 GB -> OOM on 12 GB). "
+                "Use the combined-supervisor (shared encoder). "
+                "See DECISIONS-136.",
+                used_mb,
+            )
+    except Exception:  # noqa: BLE001
+        pass  # silently skip on CPU hosts / missing CUDA driver / import error
+
 
 class RadarServer:
     """Holds the loaded corpus + embedding indexes. Tools are methods on it.
@@ -63,7 +111,11 @@ class RadarServer:
         # the same Encoder instance so a single Qwen3-4B copy fits in
         # 12 GB VRAM. Plain single-server callers pass nothing and we
         # construct one ourselves (lazy weight load on first encode).
-        self.encoder = encoder if encoder is not None else Encoder(config)
+        if encoder is None:
+            _warn_if_shared_gpu_risk()
+            self.encoder = Encoder(config)
+        else:
+            self.encoder = encoder
 
         self.abstract_index: EmbeddingIndex | None = None
         try:
@@ -237,20 +289,28 @@ class RadarServer:
         For each id we (a) skip the probe if the paper is already cached
         (counts as ok), (b) HEAD arxiv.org/html/<id> on the throttled
         rate-limiter (1 req / 3 sec; same budget as the live fetcher).
-        2xx/3xx → `ok`, 4xx/5xx → `pdf_only`. Caller can warn the user
-        before submitting a long batch with known-bad ids.
+        2xx/3xx -> `ok`, 4xx/5xx -> `pdf_fallback` (U7: when PDF parser is
+        available these papers can be fetched via the PDF tier; otherwise
+        they fail with a clear error).  Caller can warn the user before
+        submitting a long batch with known-bad ids.
 
-        Synchronous, blocking — for typical 30-50 id batches this takes
-        ≤2-3 minutes including the throttle. Skip if probing 200+ ids;
+        Synchronous, blocking -- for typical 30-50 id batches this takes
+        <=2-3 minutes including the throttle. Skip if probing 200+ ids;
         for those just use fetch_papers and read its `failed` list.
+
+        U7: payload now includes `pdf_parser_available` so callers know
+        whether the `pdf_fallback` bucket will actually be handled.
         """
+        import corpus_core.pdf as _cc_pdf  # noqa: PLC0415 -- lazy import
+
         if not arxiv_ids:
             return {"error": "arxiv_ids must be a non-empty list"}
 
         sources_dir = self.fulltext_dir / "sources"
         ok: list[str] = []
-        pdf_only: list[str] = []
+        pdf_fallback: list[str] = []
         cached: list[str] = []
+        parser_available = _cc_pdf.is_pdf_parser_available()
 
         with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0),
                           headers={"User-Agent": "arxiv-radar-mcp/0.1"},
@@ -263,15 +323,16 @@ class RadarServer:
                 if probe_html_available(pid, client=client):
                     ok.append(pid)
                 else:
-                    pdf_only.append(pid)
+                    pdf_fallback.append(pid)
 
         return {
             "n_total": len(arxiv_ids),
             "n_ok": len(ok),
-            "n_pdf_only": len(pdf_only),
+            "n_pdf_fallback": len(pdf_fallback),
             "n_cached": len(cached),
             "ok": ok,
-            "pdf_only": pdf_only,
+            "pdf_fallback": pdf_fallback,
+            "pdf_parser_available": parser_available,
         }
 
     # ----- async admin -----------------------------------------------------
@@ -384,11 +445,16 @@ class RadarServer:
                         "arxiv_id": pid,
                         "source": result.source,
                         "n_chars": result.n_chars,
+                        "n_images": len(result.images),
                     })
                     source_counts[result.source or "unknown"] += 1
                 else:
                     failed.append({"arxiv_id": pid, "error": result.error or "unknown"})
                 handle.update(n_done=i + 1)
+
+        # U7: release MinerU VRAM after a batch that may have used the PDF tier,
+        # analogous to _release_encoder_vram for the bi-encoder.
+        self._release_pdf_vram()
 
         return {
             "n_total": len(arxiv_ids),
@@ -406,13 +472,27 @@ class RadarServer:
         the server lifetime once warmed. On a host that also runs DFT /
         MLIP workloads on the same GPU, calling `unload()` after each
         completed job frees that VRAM; the next search query lazily
-        re-loads (≈20 sec on RTX 4070). `unload()` is idempotent so it
+        re-loads (~20 sec on RTX 4070). `unload()` is idempotent so it
         is safe to call from every job-completion path.
         """
         try:
             self.encoder.unload()
         except Exception as e:  # noqa: BLE001
             LOG.warning(f"encoder.unload() failed (will keep model resident): {e}")
+
+    def _release_pdf_vram(self) -> None:
+        """Drop MinerU model singletons from VRAM after a fetch_papers batch.
+
+        U7: MinerU's pipeline+hybrid models occupy ~2-3 GB on top of the
+        ~7-8 GB Qwen3 encoder on a 12 GB GPU.  Calling this after each
+        _do_fetch job mirrors _release_encoder_vram for the PDF tier.
+        Idempotent; safe to call even when no PDF was parsed this batch.
+        """
+        try:
+            import corpus_core.pdf as _cc_pdf  # noqa: PLC0415
+            _cc_pdf.unload_pdf_models()
+        except Exception as e:  # noqa: BLE001
+            LOG.warning(f"unload_pdf_models() failed (will keep models resident): {e}")
 
     def _do_refresh(self, handle: JobHandle, *, full_rebuild: bool) -> dict:
         try:
@@ -681,12 +761,17 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "description": (
             "Download + parse + cache full text for one or more arxiv_ids. "
             "Returns {job_id} immediately; poll job_status until state=done. "
-            "Sources tried in order: arxiv.org/html → arxiv.org/e-print "
-            "(LaTeX). Papers without HTML or LaTeX (PDF-only) fail with "
-            "a clear reason. Doesn't trigger reindex — call reindex when "
-            "ready. Pass `force=true` to re-download cached papers (e.g. "
-            "when an earlier fetch landed a stub — short body that's only "
-            "abstract + bibliography)."
+            "Sources tried in order: (1) arxiv.org/html, (2) arxiv.org/e-print "
+            "(LaTeX), (3) arxiv.org/pdf parsed by MinerU (PDF tier, U7 -- "
+            "requires arxiv-radar-mcp[pdf] extra). "
+            "Papers that fail all three tiers report a clear error. "
+            "Doesn't trigger reindex -- call reindex when ready. "
+            "Pass `force=true` to re-download cached papers (e.g. when an "
+            "earlier fetch landed a stub). "
+            "TO READ A WHOLE PAPER (markdown + figures), after this completes "
+            "pull the bundle zip via the HTTP side-channel GET /download?id="
+            "<arxiv_id> on this server's host:port (see server instructions); "
+            "search_paper_* only returns chunks, not the full document."
         ),
         "inputSchema": {
             "type": "object",
@@ -785,12 +870,15 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "name": "validate_arxiv_ids",
         "description": (
             "Pre-flight check: classify each arxiv_id as `ok` (HTML render "
-            "exists, fetch_papers will likely succeed) or `pdf_only` (no "
-            "HTML — fetch_papers will fail with a clear reason). HEAD-probes "
-            "arxiv.org/html/<id> at the same 1 req / 3 sec rate as the live "
-            "fetcher. Already-cached papers count as ok without a probe. "
-            "Use this BEFORE submitting a large fetch_papers batch so the "
-            "user gets early warning about ids you can't enrich."
+            "exists, fetch_papers will likely succeed) or `pdf_fallback` (no "
+            "HTML -- when the [pdf] extra is installed, fetch_papers will "
+            "attempt PDF-tier parsing; otherwise it will fail with a clear "
+            "reason). The payload includes `pdf_parser_available` so the "
+            "caller knows whether the pdf_fallback bucket will be handled. "
+            "HEAD-probes arxiv.org/html/<id> at the same 1 req / 3 sec rate "
+            "as the live fetcher. Already-cached papers count as ok without a "
+            "probe. Use this BEFORE submitting a large fetch_papers batch so "
+            "the user gets early warning about ids you can't enrich."
         ),
         "inputSchema": {
             "type": "object",
@@ -821,12 +909,38 @@ def _dispatch(server: RadarServer, name: str, arguments: dict[str, Any] | None) 
     return make_method_dispatcher(server, _tool_names())(name, arguments)
 
 
+# Server-level metadata (MCP `initialize.instructions`) — documents the
+# binary HTTP side-channel that the tool catalogue alone can't convey.
+# Travels with the server to every client, not one local memory.
+SERVER_INSTRUCTIONS = (
+    "arxiv-radar: semantic + full-text search over arXiv. Typical flow: "
+    "search_abstract_* to find papers -> fetch_papers([ids]) to download & "
+    "parse full text (markdown + figure images, cached server-side) -> "
+    "search_paper_* to pull specific sections.\n\n"
+    "fetch_papers cascade: (1) arxiv.org/html, (2) arxiv.org/e-print (LaTeX), "
+    "(3) arxiv.org/pdf via MinerU PDF parser (requires arxiv-radar-mcp[pdf] "
+    "extra). Use validate_arxiv_ids to pre-check which papers are html-only "
+    "vs pdf_fallback before submitting a large batch.\n\n"
+    "DOWNLOAD A WHOLE PAPER (binary side-channel, NOT an MCP tool -- MCP "
+    "JSON-RPC can't carry files): after fetch_papers, GET the paper as one "
+    "zip over HTTP on the SAME host:port as this server:\n"
+    "    GET /download?id=<arxiv_id>   -> application/zip\n"
+    "The zip is a single <id>/ folder: <id>.md (markdown, with figure refs "
+    "that resolve in place) + <id>.media/<name> figures + <id>.meta.json. "
+    "Responses: 200 zip, 400 missing ?id=, 404 not fetched yet. Example:\n"
+    "    curl 'http://<host>:<port>/download?id=2603.05238' -o paper.zip && unzip paper.zip\n"
+    "(arxiv-radar has no upload -- it fetches from arxiv.org itself; the "
+    "lab-corpus server is the one with POST /upload for local PDFs.)"
+)
+
+
 def _build_mcp_app(radar: RadarServer):
     """Construct the MCP app for `radar`, wired with our TOOL_SPECS."""
     return build_mcp_app(
         server_name="arxiv-radar",
         tool_specs=TOOL_SPECS,
         dispatcher=make_method_dispatcher(radar, _tool_names()),
+        instructions=SERVER_INSTRUCTIONS,
     )
 
 
@@ -938,6 +1052,7 @@ async def _run_stdio(radar: RadarServer) -> None:
         tool_specs=TOOL_SPECS,
         dispatcher=make_method_dispatcher(radar, _tool_names()),
         background_tasks=_arxiv_background_tasks(radar),
+        instructions=SERVER_INSTRUCTIONS,
     )
 
 
@@ -946,8 +1061,16 @@ async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None
 
     Bind to 127.0.0.1 by default in production deployments — perimeter
     auth comes from an SSH tunnel, NOT from this server. See README for
-    the deployment topology.
+    the deployment topology. Mounts a `GET /download?id=<arxiv_id>`
+    side-channel next to `/mcp` for the figure-bundle zip — the shared
+    `corpus_core.make_download_handler`, fed our `sources/<id>.media`
+    layout via `paper_files`.
     """
+    from starlette.routing import Route  # noqa: PLC0415
+
+    download = make_download_handler(
+        lambda pid: paper_files(radar.fulltext_dir, pid),
+    )
     await serve_streamable_http(
         server_name="arxiv-radar",
         tool_specs=TOOL_SPECS,
@@ -955,6 +1078,8 @@ async def _run_streamable_http(radar: RadarServer, host: str, port: int) -> None
         host=host,
         port=port,
         background_tasks=_arxiv_background_tasks(radar),
+        extra_routes=[Route("/download", endpoint=download, methods=["GET"])],
+        instructions=SERVER_INSTRUCTIONS,
     )
 
 

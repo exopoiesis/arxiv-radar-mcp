@@ -22,7 +22,7 @@ dependencies = [
     # Core shared infrastructure (Encoder, EmbeddingIndex, JobRegistry,
     # mcp_scaffold, search primitives, chunker, corpus_index, proxy,
     # reranker). Published on PyPI as corpus-core; for dev: `pip install -e ../corpus-core`.
-    "corpus-core>=0.1.0",
+    "corpus-core>=0.2.0",
     "mcp>=1.0",
     "sentence-transformers>=3.0",
     "numpy>=1.26",
